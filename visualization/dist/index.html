@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>aw-watcher-llm</title>
+    <link rel="stylesheet" href="./styles.css">
+  </head>
+  <body>
+    <div class="page">
+      <header class="toolbar">
+        <div class="titlebar">
+          <p class="eyebrow">ActivityWatch Custom Visualization</p>
+          <h1>LLM Session Lanes</h1>
+        </div>
+
+        <div class="controls">
+          <label>
+            <span>Host</span>
+            <input id="host-input" type="text" value="" placeholder="Loading hostname...">
+          </label>
+          <label>
+            <span>Date</span>
+            <input id="date-input" type="date">
+          </label>
+          <label>
+            <span>Source</span>
+            <select id="source-select">
+              <option value="opencode">OpenCode</option>
+              <option value="claudecode">Claude Code</option>
+              <option value="codex">Codex</option>
+            </select>
+          </label>
+          <button id="load-button" type="button">Reload</button>
+        </div>
+      </header>
+
+      <section class="summary-strip" id="summary"></section>
+
+      <section class="chart-frame">
+        <div class="chart-header chart-header-focus">
+          <div>
+            <h2>Focus Ribbon</h2>
+            <p id="focus-caption"></p>
+          </div>
+        </div>
+        <div id="focus-ribbon" class="focus-ribbon"></div>
+
+        <div class="chart-header chart-header-lanes">
+          <div>
+            <h2>Root Lanes</h2>
+            <p id="lanes-caption"></p>
+          </div>
+        </div>
+        <div class="lanes-shell">
+          <div id="lanes-root" class="lanes-root"></div>
+        </div>
+      </section>
+
+      <section class="inspector-strip">
+        <div class="inspector-header">
+          <h2>Inspector</h2>
+        </div>
+        <div id="inspector" class="inspector empty">Select a lane to inspect it.</div>
+      </section>
+
+      <details class="status-panel">
+        <summary>Status</summary>
+        <div class="status-body">
+          <pre id="status-log" class="status-log"></pre>
+        </div>
+      </details>
+    </div>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>
