@@ -12,9 +12,13 @@ from urllib.error import HTTPError
 from urllib.parse import quote
 from urllib.parse import urlencode
 from urllib.parse import urljoin
+from urllib.parse import urlsplit
+from urllib.request import ProxyHandler
 from urllib.request import Request
+from urllib.request import build_opener
 from urllib.request import urlopen
 
+from .schema import BucketEvents
 from .schema import BucketSpec
 from .schema import Event
 from .schema import WatcherPayload
@@ -27,16 +31,32 @@ class ActivityWatchError(RuntimeError):
 @dataclass(frozen=True)
 class PushSummary:
     raw_inserted: int
-    display_inserted: int
     raw_deleted: int
-    display_deleted: int
+    session_bucket_count: int = 0
+    session_inserted: int = 0
+    session_deleted: int = 0
 
     def to_dict(self) -> dict[str, int]:
         return {
             "raw_inserted": self.raw_inserted,
-            "display_inserted": self.display_inserted,
             "raw_deleted": self.raw_deleted,
-            "display_deleted": self.display_deleted,
+            "session_bucket_count": self.session_bucket_count,
+            "session_inserted": self.session_inserted,
+            "session_deleted": self.session_deleted,
+        }
+
+
+@dataclass(frozen=True)
+class BucketBatchSummary:
+    bucket_count: int
+    events_inserted: int
+    events_deleted: int
+
+    def to_dict(self) -> dict[str, int]:
+        return {
+            "bucket_count": self.bucket_count,
+            "events_inserted": self.events_inserted,
+            "events_deleted": self.events_deleted,
         }
 
 
@@ -121,43 +141,71 @@ class ActivityWatchTransport:
         self,
         payload: WatcherPayload,
         *,
-        only: str = "all",
         replace_start: str | None = None,
         replace_end: str | None = None,
     ) -> PushSummary:
-        raw_inserted = 0
-        display_inserted = 0
-        raw_deleted = 0
-        display_deleted = 0
-
-        if only in ("all", "raw"):
-            self.create_bucket(payload.raw_bucket)
-            if replace_start and replace_end:
-                raw_deleted = self.delete_events_in_range(
-                    payload.raw_bucket.id,
-                    start=replace_start,
-                    end=replace_end,
-                )
-            self.insert_events(payload.raw_bucket.id, payload.raw_events)
-            raw_inserted = len(payload.raw_events)
-
-        if only in ("all", "display"):
-            self.create_bucket(payload.display_bucket)
-            if replace_start and replace_end:
-                display_deleted = self.delete_events_in_range(
-                    payload.display_bucket.id,
-                    start=replace_start,
-                    end=replace_end,
-                )
-            self.insert_events(payload.display_bucket.id, payload.display_events)
-            display_inserted = len(payload.display_events)
+        raw_inserted, raw_deleted = self._push_bucket_events(
+            payload.raw_bucket,
+            payload.raw_events,
+            replace_start=replace_start,
+            replace_end=replace_end,
+        )
+        session_summary = self.push_bucket_events_batch(
+            payload.session_buckets,
+            replace_start=replace_start,
+            replace_end=replace_end,
+        )
 
         return PushSummary(
             raw_inserted=raw_inserted,
-            display_inserted=display_inserted,
             raw_deleted=raw_deleted,
-            display_deleted=display_deleted,
+            session_bucket_count=session_summary.bucket_count,
+            session_inserted=session_summary.events_inserted,
+            session_deleted=session_summary.events_deleted,
         )
+
+    def push_bucket_events_batch(
+        self,
+        bucket_events: list[BucketEvents],
+        *,
+        replace_start: str | None = None,
+        replace_end: str | None = None,
+    ) -> BucketBatchSummary:
+        inserted = 0
+        deleted = 0
+        for item in bucket_events:
+            item_inserted, item_deleted = self._push_bucket_events(
+                item.bucket,
+                item.events,
+                replace_start=replace_start,
+                replace_end=replace_end,
+            )
+            inserted += item_inserted
+            deleted += item_deleted
+        return BucketBatchSummary(
+            bucket_count=len(bucket_events),
+            events_inserted=inserted,
+            events_deleted=deleted,
+        )
+
+    def _push_bucket_events(
+        self,
+        bucket: BucketSpec,
+        events: list[Event],
+        *,
+        replace_start: str | None = None,
+        replace_end: str | None = None,
+    ) -> tuple[int, int]:
+        deleted = 0
+        self.create_bucket(bucket)
+        if replace_start and replace_end:
+            deleted = self.delete_events_in_range(
+                bucket.id,
+                start=replace_start,
+                end=replace_end,
+            )
+        self.insert_events(bucket.id, events)
+        return len(events), deleted
 
     def _request(
         self,
@@ -186,7 +234,7 @@ class ActivityWatchTransport:
         )
 
         try:
-            with urlopen(request, timeout=self.timeout_seconds) as response:
+            with self._open(request, url) as response:
                 status = response.getcode()
                 raw = response.read()
         except HTTPError as exc:
@@ -208,6 +256,12 @@ class ActivityWatchTransport:
         except json.JSONDecodeError:
             return text
 
+    def _open(self, request: Request, url: str):
+        if _should_bypass_proxies(url):
+            opener = build_opener(ProxyHandler({}))
+            return opener.open(request, timeout=self.timeout_seconds)
+        return urlopen(request, timeout=self.timeout_seconds)
+
 
 def local_day_bounds(target_date: date) -> tuple[datetime, datetime]:
     local_tz = datetime.now().astimezone().tzinfo
@@ -218,3 +272,8 @@ def local_day_bounds(target_date: date) -> tuple[datetime, datetime]:
 
 def default_local_hostname() -> str:
     return socket.gethostname()
+
+
+def _should_bypass_proxies(url: str) -> bool:
+    hostname = (urlsplit(url).hostname or "").lower()
+    return hostname in {"127.0.0.1", "localhost", "::1"} or hostname.endswith(".localhost")

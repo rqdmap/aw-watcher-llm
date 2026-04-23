@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict
 from dataclasses import dataclass
+from dataclasses import field
 from typing import Any
 
 
@@ -32,16 +33,26 @@ class Event:
 
 
 @dataclass(frozen=True)
+class BucketEvents:
+    bucket: BucketSpec
+    events: list[Event]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "bucket": self.bucket.to_dict(),
+            "events": [event.to_dict() for event in self.events],
+        }
+
+
+@dataclass(frozen=True)
 class WatcherPayload:
     raw_bucket: BucketSpec
-    display_bucket: BucketSpec
     raw_events: list[Event]
-    display_events: list[Event]
+    session_buckets: list[BucketEvents] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "raw_bucket": self.raw_bucket.to_dict(),
-            "display_bucket": self.display_bucket.to_dict(),
             "raw_events": [event.to_dict() for event in self.raw_events],
-            "display_events": [event.to_dict() for event in self.display_events],
+            "session_buckets": [item.to_dict() for item in self.session_buckets],
         }

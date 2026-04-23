@@ -4,6 +4,8 @@ import argparse
 import json
 import sys
 from datetime import date
+from datetime import datetime
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -12,11 +14,14 @@ from .activitywatch import ActivityWatchError
 from .activitywatch import local_day_bounds
 from .buckets import RAW_SOURCES
 from .buckets import default_host
-from .buckets import focus_bucket_id
 from .buckets import raw_bucket_id
+from .buckets import session_bucket_prefix
+from .buckets import session_workspace_host
 from .demo import build_demo_payload
 from .opencode import collect_payload as collect_opencode_payload
+from .opencode import collect_session_buckets as collect_opencode_session_buckets
 from .opencode import find_db as find_opencode_db
+from .visualization_server import serve_visualization
 
 
 def main() -> int:
@@ -29,12 +34,6 @@ def main() -> int:
     demo_json = subparsers.add_parser("demo-json", help="print demo payload as JSON")
     _add_host_argument(demo_json)
     demo_json.add_argument("--source", choices=RAW_SOURCES, default="opencode")
-    demo_json.add_argument(
-        "--only",
-        choices=("all", "raw", "display"),
-        default="all",
-        help="limit output to one layer",
-    )
     demo_json.add_argument("--pretty", action="store_true")
 
     opencode_json = subparsers.add_parser(
@@ -44,13 +43,17 @@ def main() -> int:
     _add_host_argument(opencode_json)
     opencode_json.add_argument("--date", dest="target_date", type=_parse_date, default=date.today())
     opencode_json.add_argument("--db-path", type=Path)
-    opencode_json.add_argument(
-        "--only",
-        choices=("all", "raw", "display"),
-        default="all",
-        help="limit output to one layer",
-    )
     opencode_json.add_argument("--pretty", action="store_true")
+
+    opencode_session_buckets_json = subparsers.add_parser(
+        "opencode-session-buckets-json",
+        help="build one workspace bucket per OpenCode session for a day",
+    )
+    _add_host_argument(opencode_session_buckets_json)
+    opencode_session_buckets_json.add_argument("--date", dest="target_date", type=_parse_date, default=date.today())
+    opencode_session_buckets_json.add_argument("--db-path", type=Path)
+    _add_include_child_sessions_argument(opencode_session_buckets_json)
+    opencode_session_buckets_json.add_argument("--pretty", action="store_true")
 
     opencode_push = subparsers.add_parser(
         "opencode-push",
@@ -62,12 +65,6 @@ def main() -> int:
     opencode_push.add_argument("--aw-url", default="http://127.0.0.1:5600")
     opencode_push.add_argument("--timeout-seconds", type=float, default=10.0)
     opencode_push.add_argument(
-        "--only",
-        choices=("all", "raw", "display"),
-        default="all",
-        help="limit upload to one layer",
-    )
-    opencode_push.add_argument(
         "--replace-day",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -75,17 +72,135 @@ def main() -> int:
     )
     opencode_push.add_argument("--pretty", action="store_true")
 
+    opencode_session_buckets_push = subparsers.add_parser(
+        "opencode-session-buckets-push",
+        help="push one workspace bucket per OpenCode session into ActivityWatch",
+    )
+    _add_host_argument(opencode_session_buckets_push)
+    opencode_session_buckets_push.add_argument("--date", dest="target_date", type=_parse_date, default=date.today())
+    opencode_session_buckets_push.add_argument("--db-path", type=Path)
+    _add_include_child_sessions_argument(opencode_session_buckets_push)
+    opencode_session_buckets_push.add_argument("--aw-url", default="http://127.0.0.1:5600")
+    opencode_session_buckets_push.add_argument("--timeout-seconds", type=float, default=10.0)
+    opencode_session_buckets_push.add_argument(
+        "--replace-day",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="replace only the same local-day window before inserting",
+    )
+    opencode_session_buckets_push.add_argument("--pretty", action="store_true")
+
+    opencode_backfill = subparsers.add_parser(
+        "opencode-backfill",
+        help="push a rolling window of OpenCode raw events into ActivityWatch",
+    )
+    _add_host_argument(opencode_backfill)
+    opencode_backfill.add_argument("--end-date", dest="target_date", type=_parse_date, default=date.today())
+    opencode_backfill.add_argument("--days", type=int, default=30)
+    opencode_backfill.add_argument("--db-path", type=Path)
+    opencode_backfill.add_argument("--aw-url", default="http://127.0.0.1:5600")
+    opencode_backfill.add_argument("--timeout-seconds", type=float, default=10.0)
+    opencode_backfill.add_argument(
+        "--replace-day",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="replace only the same local-day window before inserting",
+    )
+    opencode_backfill.add_argument("--pretty", action="store_true")
+
+    opencode_session_buckets_backfill = subparsers.add_parser(
+        "opencode-session-buckets-backfill",
+        help="backfill the per-session workspace buckets for a rolling window",
+    )
+    _add_host_argument(opencode_session_buckets_backfill)
+    opencode_session_buckets_backfill.add_argument("--end-date", dest="target_date", type=_parse_date, default=date.today())
+    opencode_session_buckets_backfill.add_argument("--days", type=int, default=30)
+    opencode_session_buckets_backfill.add_argument("--db-path", type=Path)
+    _add_include_child_sessions_argument(opencode_session_buckets_backfill)
+    opencode_session_buckets_backfill.add_argument("--aw-url", default="http://127.0.0.1:5600")
+    opencode_session_buckets_backfill.add_argument("--timeout-seconds", type=float, default=10.0)
+    opencode_session_buckets_backfill.add_argument(
+        "--replace-day",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="replace only the same local-day window before inserting",
+    )
+    opencode_session_buckets_backfill.add_argument("--pretty", action="store_true")
+
+    opencode_watch = subparsers.add_parser(
+        "opencode-watch",
+        help="run a polling watcher that refreshes today's OpenCode raw events",
+    )
+    _add_host_argument(opencode_watch)
+    opencode_watch.add_argument("--db-path", type=Path)
+    opencode_watch.add_argument("--aw-url", default="http://127.0.0.1:5600")
+    opencode_watch.add_argument("--timeout-seconds", type=float, default=10.0)
+    opencode_watch.add_argument("--interval-seconds", type=float, default=15.0)
+    opencode_watch.add_argument(
+        "--replace-day",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="replace only the same local-day window before inserting",
+    )
+    opencode_watch.add_argument(
+        "--iterations",
+        type=int,
+        default=0,
+        help="stop after N polling cycles (0 means run forever)",
+    )
+    opencode_watch.add_argument("--pretty", action="store_true")
+
+    opencode_session_buckets_watch = subparsers.add_parser(
+        "opencode-session-buckets-watch",
+        help="poll and refresh the per-session workspace buckets for today's OpenCode activity",
+    )
+    _add_host_argument(opencode_session_buckets_watch)
+    opencode_session_buckets_watch.add_argument("--db-path", type=Path)
+    _add_include_child_sessions_argument(opencode_session_buckets_watch)
+    opencode_session_buckets_watch.add_argument("--aw-url", default="http://127.0.0.1:5600")
+    opencode_session_buckets_watch.add_argument("--timeout-seconds", type=float, default=10.0)
+    opencode_session_buckets_watch.add_argument("--interval-seconds", type=float, default=15.0)
+    opencode_session_buckets_watch.add_argument(
+        "--replace-day",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="replace only the same local-day window before inserting",
+    )
+    opencode_session_buckets_watch.add_argument(
+        "--iterations",
+        type=int,
+        default=0,
+        help="stop after N polling cycles (0 means run forever)",
+    )
+    opencode_session_buckets_watch.add_argument("--pretty", action="store_true")
+
+    visualize_serve = subparsers.add_parser(
+        "visualize-serve",
+        help="serve the standalone visualization locally and proxy ActivityWatch API requests",
+    )
+    visualize_serve.add_argument("--aw-url", default="http://127.0.0.1:5600")
+    visualize_serve.add_argument("--bind", default="127.0.0.1")
+    visualize_serve.add_argument("--port", type=int, default=8787)
+    visualize_serve.add_argument("--open", action="store_true", dest="open_browser")
+
     args = parser.parse_args()
     if args.command == "bucket-ids":
         return _cmd_bucket_ids(args.host)
     if args.command == "demo-json":
-        return _cmd_demo_json(args.host, args.source, args.only, args.pretty)
+        return _cmd_demo_json(args.host, args.source, args.pretty)
     if args.command == "opencode-json":
         return _cmd_opencode_json(
             host=args.host,
             target_date=args.target_date,
             db_path=args.db_path,
-            only=args.only,
+            pretty=args.pretty,
+        )
+    if args.command == "opencode-session-buckets-json":
+        return _cmd_opencode_session_buckets_json(
+            host=args.host,
+            target_date=args.target_date,
+            db_path=args.db_path,
+            include_child_sessions=args.include_child_sessions,
             pretty=args.pretty,
         )
     if args.command == "opencode-push":
@@ -95,9 +210,72 @@ def main() -> int:
             db_path=args.db_path,
             aw_url=args.aw_url,
             timeout_seconds=args.timeout_seconds,
-            only=args.only,
             replace_day=args.replace_day,
             pretty=args.pretty,
+        )
+    if args.command == "opencode-session-buckets-push":
+        return _cmd_opencode_session_buckets_push(
+            host=args.host,
+            target_date=args.target_date,
+            db_path=args.db_path,
+            include_child_sessions=args.include_child_sessions,
+            aw_url=args.aw_url,
+            timeout_seconds=args.timeout_seconds,
+            replace_day=args.replace_day,
+            pretty=args.pretty,
+        )
+    if args.command == "opencode-backfill":
+        return _cmd_opencode_backfill(
+            host=args.host,
+            target_date=args.target_date,
+            days=args.days,
+            db_path=args.db_path,
+            aw_url=args.aw_url,
+            timeout_seconds=args.timeout_seconds,
+            replace_day=args.replace_day,
+            pretty=args.pretty,
+        )
+    if args.command == "opencode-session-buckets-backfill":
+        return _cmd_opencode_session_buckets_backfill(
+            host=args.host,
+            target_date=args.target_date,
+            days=args.days,
+            db_path=args.db_path,
+            include_child_sessions=args.include_child_sessions,
+            aw_url=args.aw_url,
+            timeout_seconds=args.timeout_seconds,
+            replace_day=args.replace_day,
+            pretty=args.pretty,
+        )
+    if args.command == "opencode-watch":
+        return _cmd_opencode_watch(
+            host=args.host,
+            db_path=args.db_path,
+            aw_url=args.aw_url,
+            timeout_seconds=args.timeout_seconds,
+            interval_seconds=args.interval_seconds,
+            replace_day=args.replace_day,
+            iterations=args.iterations,
+            pretty=args.pretty,
+        )
+    if args.command == "opencode-session-buckets-watch":
+        return _cmd_opencode_session_buckets_watch(
+            host=args.host,
+            db_path=args.db_path,
+            include_child_sessions=args.include_child_sessions,
+            aw_url=args.aw_url,
+            timeout_seconds=args.timeout_seconds,
+            interval_seconds=args.interval_seconds,
+            replace_day=args.replace_day,
+            iterations=args.iterations,
+            pretty=args.pretty,
+        )
+    if args.command == "visualize-serve":
+        return _cmd_visualize_serve(
+            aw_url=args.aw_url,
+            bind=args.bind,
+            port=args.port,
+            open_browser=args.open_browser,
         )
     raise AssertionError("unreachable")
 
@@ -110,20 +288,33 @@ def _add_host_argument(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_include_child_sessions_argument(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--include-child-sessions",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="include child/subagent sessions in the session workspace projection",
+    )
+
+
 def _cmd_bucket_ids(host: str) -> int:
     host = _resolve_local_host(host)
+    workspace_host = session_workspace_host(host)
     payload = {
         "raw": {source: raw_bucket_id(source, host) for source in RAW_SOURCES},
-        "display": focus_bucket_id(host),
+        "session_workspace_host": workspace_host,
+        "session_workspace_prefix": {
+            source: session_bucket_prefix(source, workspace_host) for source in RAW_SOURCES
+        },
     }
     print(json.dumps(payload, indent=2, ensure_ascii=False))
     return 0
 
 
-def _cmd_demo_json(host: str, source: str, only: str, pretty: bool) -> int:
+def _cmd_demo_json(host: str, source: str, pretty: bool) -> int:
     host = _resolve_local_host(host)
     payload = build_demo_payload(host=host, source=source).to_dict()
-    return _print_payload(payload, only=only, pretty=pretty)
+    return _print_payload(payload, pretty=pretty)
 
 
 def _cmd_opencode_json(
@@ -131,7 +322,6 @@ def _cmd_opencode_json(
     host: str,
     target_date: date,
     db_path: Path | None,
-    only: str,
     pretty: bool,
 ) -> int:
     host = _resolve_local_host(host)
@@ -144,7 +334,37 @@ def _cmd_opencode_json(
         target_date=target_date,
         db_path=resolved,
     ).to_dict()
-    return _print_payload(payload, only=only, pretty=pretty)
+    return _print_payload(payload, pretty=pretty)
+
+
+def _cmd_opencode_session_buckets_json(
+    *,
+    host: str,
+    target_date: date,
+    db_path: Path | None,
+    include_child_sessions: bool,
+    pretty: bool,
+) -> int:
+    host = _resolve_session_workspace_local_host(host)
+    resolved = db_path or find_opencode_db()
+    if resolved is None:
+        print("no OpenCode database found", file=sys.stderr)
+        return 1
+    session_buckets = collect_opencode_session_buckets(
+        host=host,
+        target_date=target_date,
+        db_path=resolved,
+        include_child_sessions=include_child_sessions,
+    )
+    payload = {
+        "host": host,
+        "date": target_date.isoformat(),
+        "db_path": str(resolved),
+        "include_child_sessions": include_child_sessions,
+        "session_bucket_count": len(session_buckets),
+        "session_buckets": [item.to_dict() for item in session_buckets],
+    }
+    return _print_payload(payload, pretty=pretty)
 
 
 def _cmd_opencode_push(
@@ -154,7 +374,6 @@ def _cmd_opencode_push(
     db_path: Path | None,
     aw_url: str,
     timeout_seconds: float,
-    only: str,
     replace_day: bool,
     pretty: bool,
 ) -> int:
@@ -180,7 +399,6 @@ def _cmd_opencode_push(
     )
     summary = transport.push_payload(
         payload,
-        only=only,
         replace_start=replace_start,
         replace_end=replace_end,
     )
@@ -189,11 +407,9 @@ def _cmd_opencode_push(
         "host": host,
         "date": target_date.isoformat(),
         "db_path": str(resolved),
-        "only": only,
         "replace_day": replace_day,
         "summary": summary.to_dict(),
         "raw_bucket": payload.raw_bucket.to_dict(),
-        "display_bucket": payload.display_bucket.to_dict(),
     }
     if pretty:
         print(json.dumps(output, indent=2, ensure_ascii=False))
@@ -202,19 +418,336 @@ def _cmd_opencode_push(
     return 0
 
 
-def _print_payload(payload: dict[str, Any], *, only: str, pretty: bool) -> int:
-    if only == "raw":
-        output: dict[str, Any] = {
-            "raw_bucket": payload["raw_bucket"],
-            "raw_events": payload["raw_events"],
-        }
-    elif only == "display":
-        output = {
-            "display_bucket": payload["display_bucket"],
-            "display_events": payload["display_events"],
-        }
+def _cmd_opencode_session_buckets_push(
+    *,
+    host: str,
+    target_date: date,
+    db_path: Path | None,
+    include_child_sessions: bool,
+    aw_url: str,
+    timeout_seconds: float,
+    replace_day: bool,
+    pretty: bool,
+) -> int:
+    host = _resolve_session_workspace_push_host(host, aw_url=aw_url, timeout_seconds=timeout_seconds)
+    resolved = db_path or find_opencode_db()
+    if resolved is None:
+        print("no OpenCode database found", file=sys.stderr)
+        return 1
+    session_buckets = collect_opencode_session_buckets(
+        host=host,
+        target_date=target_date,
+        db_path=resolved,
+        include_child_sessions=include_child_sessions,
+    )
+    replace_start = None
+    replace_end = None
+    if replace_day:
+        start, end = local_day_bounds(target_date)
+        replace_start = start.isoformat()
+        replace_end = end.isoformat()
+    transport = ActivityWatchTransport(
+        base_url=aw_url,
+        timeout_seconds=timeout_seconds,
+    )
+    summary = transport.push_bucket_events_batch(
+        session_buckets,
+        replace_start=replace_start,
+        replace_end=replace_end,
+    )
+    output: dict[str, Any] = {
+        "aw_url": aw_url,
+        "host": host,
+        "date": target_date.isoformat(),
+        "db_path": str(resolved),
+        "include_child_sessions": include_child_sessions,
+        "replace_day": replace_day,
+        "summary": summary.to_dict(),
+    }
+    if pretty:
+        print(json.dumps(output, indent=2, ensure_ascii=False))
     else:
-        output = payload
+        print(json.dumps(output, ensure_ascii=False))
+    return 0
+
+
+def _cmd_opencode_backfill(
+    *,
+    host: str,
+    target_date: date,
+    days: int,
+    db_path: Path | None,
+    aw_url: str,
+    timeout_seconds: float,
+    replace_day: bool,
+    pretty: bool,
+) -> int:
+    if days <= 0:
+        print("--days must be positive", file=sys.stderr)
+        return 1
+    host = _resolve_push_host(host, aw_url=aw_url, timeout_seconds=timeout_seconds)
+    resolved = db_path or find_opencode_db()
+    if resolved is None:
+        print("no OpenCode database found", file=sys.stderr)
+        return 1
+    transport = ActivityWatchTransport(base_url=aw_url, timeout_seconds=timeout_seconds)
+    items: list[dict[str, Any]] = []
+    total_inserted = 0
+    total_deleted = 0
+    for offset in range(days - 1, -1, -1):
+        day = target_date - timedelta(days=offset)
+        payload = collect_opencode_payload(host=host, target_date=day, db_path=resolved)
+        replace_start = None
+        replace_end = None
+        if replace_day:
+            start, end = local_day_bounds(day)
+            replace_start = start.isoformat()
+            replace_end = end.isoformat()
+        summary = transport.push_payload(
+            payload,
+            replace_start=replace_start,
+            replace_end=replace_end,
+        )
+        total_inserted += summary.raw_inserted
+        total_deleted += summary.raw_deleted
+        items.append(
+            {
+                "date": day.isoformat(),
+                "raw_inserted": summary.raw_inserted,
+                "raw_deleted": summary.raw_deleted,
+            }
+        )
+    output = {
+        "aw_url": aw_url,
+        "host": host,
+        "days": days,
+        "end_date": target_date.isoformat(),
+        "db_path": str(resolved),
+        "replace_day": replace_day,
+        "summary": {
+            "raw_inserted": total_inserted,
+            "raw_deleted": total_deleted,
+        },
+        "items": items,
+    }
+    if pretty:
+        print(json.dumps(output, indent=2, ensure_ascii=False))
+    else:
+        print(json.dumps(output, ensure_ascii=False))
+    return 0
+
+
+def _cmd_opencode_session_buckets_backfill(
+    *,
+    host: str,
+    target_date: date,
+    days: int,
+    db_path: Path | None,
+    include_child_sessions: bool,
+    aw_url: str,
+    timeout_seconds: float,
+    replace_day: bool,
+    pretty: bool,
+) -> int:
+    if days <= 0:
+        print("--days must be positive", file=sys.stderr)
+        return 1
+    host = _resolve_session_workspace_push_host(host, aw_url=aw_url, timeout_seconds=timeout_seconds)
+    resolved = db_path or find_opencode_db()
+    if resolved is None:
+        print("no OpenCode database found", file=sys.stderr)
+        return 1
+    transport = ActivityWatchTransport(base_url=aw_url, timeout_seconds=timeout_seconds)
+    items: list[dict[str, Any]] = []
+    total_buckets = 0
+    total_inserted = 0
+    total_deleted = 0
+    for offset in range(days - 1, -1, -1):
+        day = target_date - timedelta(days=offset)
+        session_buckets = collect_opencode_session_buckets(
+            host=host,
+            target_date=day,
+            db_path=resolved,
+            include_child_sessions=include_child_sessions,
+        )
+        replace_start = None
+        replace_end = None
+        if replace_day:
+            start, end = local_day_bounds(day)
+            replace_start = start.isoformat()
+            replace_end = end.isoformat()
+        summary = transport.push_bucket_events_batch(
+            session_buckets,
+            replace_start=replace_start,
+            replace_end=replace_end,
+        )
+        total_buckets += summary.bucket_count
+        total_inserted += summary.events_inserted
+        total_deleted += summary.events_deleted
+        items.append(
+            {
+                "date": day.isoformat(),
+                "bucket_count": summary.bucket_count,
+                "events_inserted": summary.events_inserted,
+                "events_deleted": summary.events_deleted,
+            }
+        )
+    output = {
+        "aw_url": aw_url,
+        "host": host,
+        "days": days,
+        "end_date": target_date.isoformat(),
+        "db_path": str(resolved),
+        "include_child_sessions": include_child_sessions,
+        "replace_day": replace_day,
+        "summary": {
+            "bucket_count": total_buckets,
+            "events_inserted": total_inserted,
+            "events_deleted": total_deleted,
+        },
+        "items": items,
+    }
+    if pretty:
+        print(json.dumps(output, indent=2, ensure_ascii=False))
+    else:
+        print(json.dumps(output, ensure_ascii=False))
+    return 0
+
+
+def _cmd_opencode_watch(
+    *,
+    host: str,
+    db_path: Path | None,
+    aw_url: str,
+    timeout_seconds: float,
+    interval_seconds: float,
+    replace_day: bool,
+    iterations: int,
+    pretty: bool,
+) -> int:
+    if interval_seconds <= 0:
+        print("--interval-seconds must be positive", file=sys.stderr)
+        return 1
+    if iterations < 0:
+        print("--iterations must be >= 0", file=sys.stderr)
+        return 1
+    host = _resolve_push_host(host, aw_url=aw_url, timeout_seconds=timeout_seconds)
+    resolved = db_path or find_opencode_db()
+    if resolved is None:
+        print("no OpenCode database found", file=sys.stderr)
+        return 1
+    transport = ActivityWatchTransport(base_url=aw_url, timeout_seconds=timeout_seconds)
+    count = 0
+    while True:
+        now = datetime.now().astimezone()
+        target_date = now.date()
+        payload = collect_opencode_payload(host=host, target_date=target_date, db_path=resolved)
+        replace_start = None
+        replace_end = None
+        if replace_day:
+            start, end = local_day_bounds(target_date)
+            replace_start = start.isoformat()
+            replace_end = end.isoformat()
+        summary = transport.push_payload(
+            payload,
+            replace_start=replace_start,
+            replace_end=replace_end,
+        )
+        output = {
+            "timestamp": now.isoformat(),
+            "host": host,
+            "date": target_date.isoformat(),
+            "db_path": str(resolved),
+            "replace_day": replace_day,
+            "summary": summary.to_dict(),
+            "raw_bucket": payload.raw_bucket.to_dict(),
+        }
+        if pretty:
+            print(json.dumps(output, indent=2, ensure_ascii=False))
+        else:
+            print(json.dumps(output, ensure_ascii=False))
+        count += 1
+        if iterations and count >= iterations:
+            return 0
+        try:
+            import time as _time
+
+            _time.sleep(interval_seconds)
+        except KeyboardInterrupt:
+            return 0
+
+
+def _cmd_opencode_session_buckets_watch(
+    *,
+    host: str,
+    db_path: Path | None,
+    include_child_sessions: bool,
+    aw_url: str,
+    timeout_seconds: float,
+    interval_seconds: float,
+    replace_day: bool,
+    iterations: int,
+    pretty: bool,
+) -> int:
+    if interval_seconds <= 0:
+        print("--interval-seconds must be positive", file=sys.stderr)
+        return 1
+    if iterations < 0:
+        print("--iterations must be >= 0", file=sys.stderr)
+        return 1
+    host = _resolve_session_workspace_push_host(host, aw_url=aw_url, timeout_seconds=timeout_seconds)
+    resolved = db_path or find_opencode_db()
+    if resolved is None:
+        print("no OpenCode database found", file=sys.stderr)
+        return 1
+    transport = ActivityWatchTransport(base_url=aw_url, timeout_seconds=timeout_seconds)
+    count = 0
+    while True:
+        now = datetime.now().astimezone()
+        target_date = now.date()
+        session_buckets = collect_opencode_session_buckets(
+            host=host,
+            target_date=target_date,
+            db_path=resolved,
+            include_child_sessions=include_child_sessions,
+        )
+        replace_start = None
+        replace_end = None
+        if replace_day:
+            start, end = local_day_bounds(target_date)
+            replace_start = start.isoformat()
+            replace_end = end.isoformat()
+        summary = transport.push_bucket_events_batch(
+            session_buckets,
+            replace_start=replace_start,
+            replace_end=replace_end,
+        )
+        output = {
+            "timestamp": now.isoformat(),
+            "host": host,
+            "date": target_date.isoformat(),
+            "db_path": str(resolved),
+            "include_child_sessions": include_child_sessions,
+            "replace_day": replace_day,
+            "summary": summary.to_dict(),
+        }
+        if pretty:
+            print(json.dumps(output, indent=2, ensure_ascii=False))
+        else:
+            print(json.dumps(output, ensure_ascii=False))
+        count += 1
+        if iterations and count >= iterations:
+            return 0
+        try:
+            import time as _time
+
+            _time.sleep(interval_seconds)
+        except KeyboardInterrupt:
+            return 0
+
+
+def _print_payload(payload: dict[str, Any], *, pretty: bool) -> int:
+    output = payload
     if pretty:
         print(json.dumps(output, indent=2, ensure_ascii=False))
     else:
@@ -242,6 +775,52 @@ def _resolve_push_host(host: str | None, *, aw_url: str, timeout_seconds: float)
     if isinstance(resolved, str) and resolved:
         return resolved
     return default_host()
+
+
+def _resolve_session_workspace_local_host(host: str | None) -> str:
+    if host:
+        return host
+    return session_workspace_host(default_host())
+
+
+def _resolve_session_workspace_push_host(host: str | None, *, aw_url: str, timeout_seconds: float) -> str:
+    if host:
+        return host
+    base_host = _resolve_push_host(None, aw_url=aw_url, timeout_seconds=timeout_seconds)
+    return session_workspace_host(base_host)
+
+
+def _cmd_visualize_serve(
+    *,
+    aw_url: str,
+    bind: str,
+    port: int,
+    open_browser: bool,
+) -> int:
+    if port <= 0 or port > 65535:
+        print("--port must be between 1 and 65535", file=sys.stderr)
+        return 1
+    if not aw_url:
+        print("--aw-url must not be empty", file=sys.stderr)
+        return 1
+    viewer_url = f"http://{bind}:{port}/"
+    print(
+        json.dumps(
+            {
+                "viewer_url": viewer_url,
+                "aw_url": aw_url,
+                "bind": bind,
+                "port": port,
+            },
+            ensure_ascii=False,
+        )
+    )
+    if open_browser:
+        import webbrowser
+
+        webbrowser.open(viewer_url)
+    serve_visualization(bind=bind, port=port, aw_url=aw_url)
+    return 0
 
 
 if __name__ == "__main__":

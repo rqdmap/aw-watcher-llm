@@ -13,23 +13,22 @@ from datetime import timezone
 from pathlib import Path
 from typing import Any
 
-from .buckets import DISPLAY_BUCKET_TYPE
 from .buckets import RAW_BUCKET_TYPE
-from .buckets import focus_bucket_id
+from .buckets import SESSION_BUCKET_TYPE
 from .buckets import raw_bucket_id
+from .buckets import session_bucket_id
+from .schema import BucketEvents
 from .schema import BucketSpec
 from .schema import Event
 from .schema import WatcherPayload
 
 DEFAULT_GAP_MINUTES = 10
+MIN_WORKSPACE_EVENT_DURATION_MS = 1000
 CLIENT_NAME = "aw-watcher-llm"
 SOURCE_NAME = "opencode"
 TOOL_NAME = "OpenCode"
 OPENCODE_DIR = Path.home() / ".local" / "share" / "opencode"
-OPENCODE_CANDIDATES = (
-    OPENCODE_DIR / "opencode.db",
-    OPENCODE_DIR / "opencode_2.db",
-)
+OPENCODE_PRIMARY_DB = OPENCODE_DIR / "opencode.db"
 
 
 @dataclass(frozen=True)
@@ -77,20 +76,12 @@ class _SessionState:
     messages: list[_RawMessage]
 
 
-@dataclass(frozen=True)
-class _Burst:
-    session: _SessionState
-    start_ms: int
-    end_ms: int
-
-
 def find_db() -> Path | None:
-    existing = [candidate for candidate in OPENCODE_CANDIDATES if candidate.exists()]
-    if not existing:
+    if not OPENCODE_PRIMARY_DB.exists():
         return None
-    readable = [candidate for candidate in existing if _can_read(candidate)]
-    candidates = readable or existing
-    return max(candidates, key=_db_activity_key)
+    if _can_read(OPENCODE_PRIMARY_DB):
+        return OPENCODE_PRIMARY_DB
+    return OPENCODE_PRIMARY_DB
 
 
 def collect_payload(
@@ -98,7 +89,6 @@ def collect_payload(
     host: str,
     target_date: date,
     db_path: Path | None = None,
-    gap_minutes: int = DEFAULT_GAP_MINUTES,
 ) -> WatcherPayload:
     resolved = db_path or find_db()
     if resolved is None:
@@ -111,15 +101,54 @@ def collect_payload(
         hostname=host,
         name="LLM raw events (opencode)",
     )
-    display_bucket = BucketSpec(
-        id=focus_bucket_id(host),
-        type=DISPLAY_BUCKET_TYPE,
-        client=CLIENT_NAME,
-        hostname=host,
-        name="LLM focus timeline",
+
+    sessions, start_ms, end_ms, session_max_created = _load_sessions_for_date(
+        resolved,
+        target_date=target_date,
+    )
+    raw_events = _build_raw_events(
+        sessions=sessions,
+        start_ms=start_ms,
+        end_ms=end_ms,
+        session_max_created=session_max_created,
+    )
+    return WatcherPayload(
+        raw_bucket=raw_bucket,
+        raw_events=raw_events,
     )
 
-    connection = _connect_readonly(resolved)
+
+def collect_session_buckets(
+    *,
+    host: str,
+    target_date: date,
+    db_path: Path | None = None,
+    include_child_sessions: bool = False,
+) -> list[BucketEvents]:
+    resolved = db_path or find_db()
+    if resolved is None:
+        raise FileNotFoundError("no OpenCode database found")
+    sessions, start_ms, end_ms, session_max_created = _load_sessions_for_date(
+        resolved,
+        target_date=target_date,
+    )
+    if not include_child_sessions:
+        sessions = [session for session in sessions if not session.is_child]
+    return _build_session_bucket_payloads(
+        host=host,
+        sessions=sessions,
+        start_ms=start_ms,
+        end_ms=end_ms,
+        session_max_created=session_max_created,
+    )
+
+
+def _load_sessions_for_date(
+    db_path: Path,
+    *,
+    target_date: date,
+) -> tuple[list[_SessionState], int, int, dict[str, int]]:
+    connection = _connect_readonly(db_path)
     try:
         start_ms, end_ms = _day_bounds_ms(target_date)
         rows = _query_messages(connection, start_ms, end_ms)
@@ -133,21 +162,8 @@ def collect_payload(
         session_max_created = _query_session_max_created(connection, session_ids)
     finally:
         connection.close()
-
     sessions = _group_sessions(deduped)
-    raw_events = _build_raw_events(
-        sessions=sessions,
-        start_ms=start_ms,
-        end_ms=end_ms,
-        session_max_created=session_max_created,
-    )
-    display_events = _build_display_events(sessions=sessions, gap_minutes=gap_minutes)
-    return WatcherPayload(
-        raw_bucket=raw_bucket,
-        display_bucket=display_bucket,
-        raw_events=raw_events,
-        display_events=display_events,
-    )
+    return sessions, start_ms, end_ms, session_max_created
 
 
 def _build_raw_messages(
@@ -265,7 +281,7 @@ def _build_raw_events(
 ) -> list[Event]:
     events: list[Event] = []
     for session in sessions:
-        title = _compose_title(session.focus_label)
+        title = session.focus_label
         if start_ms <= session.created_ms < end_ms:
             events.append(
                 Event(
@@ -350,145 +366,204 @@ def _build_raw_events(
     return events
 
 
-def _build_display_events(
+def _build_session_bucket_payloads(
     *,
+    host: str,
     sessions: list[_SessionState],
-    gap_minutes: int,
-) -> list[Event]:
-    root_sessions = [session for session in sessions if not session.is_child]
-    bursts = _build_bursts(root_sessions, gap_minutes)
-    if not bursts:
-        return []
-
-    updates_by_time = _build_update_schedule(root_sessions)
-    boundaries = sorted(
-        {point for burst in bursts for point in (burst.start_ms, burst.end_ms)}
-        | set(updates_by_time)
-    )
-    priority: list[str] = []
-    segments: list[Event] = []
-    for start_ms, end_ms in zip(boundaries, boundaries[1:]):
-        if end_ms <= start_ms:
+    start_ms: int,
+    end_ms: int,
+    session_max_created: dict[str, int],
+) -> list[BucketEvents]:
+    bucket_events: list[BucketEvents] = []
+    for session in sessions:
+        events = _build_session_bucket_events(
+            session=session,
+            start_ms=start_ms,
+            end_ms=end_ms,
+            session_max_created=session_max_created,
+        )
+        if not events:
             continue
-        for session_id in updates_by_time.get(start_ms, []):
-            _move_session_to_front(priority, session_id)
-        active = [
-            burst
-            for burst in bursts
-            if burst.start_ms < end_ms and burst.end_ms > start_ms
-        ]
-        if not active:
-            continue
-        focus = _choose_focus(active, priority)
-        data = {
-            "app": TOOL_NAME,
-            "title": _compose_title(focus.session.focus_label),
-            "source": SOURCE_NAME,
-            "project": focus.session.project,
-        }
-        segments.append(
-            Event(
-                timestamp=_iso_from_ms(start_ms),
-                duration=(end_ms - start_ms) / 1000.0,
-                data=data,
+        bucket_events.append(
+            BucketEvents(
+                bucket=BucketSpec(
+                    id=session_bucket_id(SOURCE_NAME, host, session.raw_session_id),
+                    type=SESSION_BUCKET_TYPE,
+                    client=CLIENT_NAME,
+                    hostname=host,
+                    name=f"LLM session ({SOURCE_NAME}) · {_bucket_label(session.focus_label)}",
+                ),
+                events=events,
             )
         )
-    return _merge_adjacent_events(segments)
+    return sorted(bucket_events, key=lambda item: item.bucket.id)
 
 
-def _build_bursts(sessions: list[_SessionState], gap_minutes: int) -> list[_Burst]:
-    gap_ms = gap_minutes * 60 * 1000
-    bursts: list[_Burst] = []
-    for session in sessions:
-        intervals = _assistant_intervals(session)
-        if not intervals:
+def _build_session_bucket_events(
+    *,
+    session: _SessionState,
+    start_ms: int,
+    end_ms: int,
+    session_max_created: dict[str, int],
+) -> list[Event]:
+    events: list[Event] = []
+    for offset, message in enumerate(session.messages):
+        index = offset + 1
+        next_message_start_ms = None
+        if offset + 1 < len(session.messages):
+            next_message_start_ms = session.messages[offset + 1].time_created_ms
+        event_start_ms = max(start_ms, message.time_created_ms)
+        event_end_ms = min(end_ms, _workspace_message_end_ms(message, next_message_start_ms=next_message_start_ms))
+        if event_end_ms <= event_start_ms:
             continue
-        burst_start, burst_end = intervals[0]
-        for start_ms, end_ms in intervals[1:]:
-            if start_ms - burst_end <= gap_ms:
-                burst_end = max(burst_end, end_ms)
-                continue
-            bursts.append(_Burst(session=session, start_ms=burst_start, end_ms=burst_end))
-            burst_start, burst_end = start_ms, end_ms
-        bursts.append(_Burst(session=session, start_ms=burst_start, end_ms=burst_end))
-    bursts.sort(key=lambda burst: (burst.start_ms, burst.end_ms, burst.session.raw_session_id))
-    return bursts
-
-
-def _build_update_schedule(sessions: list[_SessionState]) -> dict[int, list[str]]:
-    updates: dict[int, dict[str, _SessionState]] = defaultdict(dict)
-    for session in sessions:
-        for start_ms, end_ms in _assistant_intervals(session):
-            updates[start_ms][session.raw_session_id] = session
-            updates[end_ms][session.raw_session_id] = session
-
-    ordered: dict[int, list[str]] = {}
-    for timestamp_ms, by_session in updates.items():
-        desired = sorted(by_session.values(), key=_session_priority_key)
-        ordered[timestamp_ms] = [session.raw_session_id for session in reversed(desired)]
-    return ordered
-
-
-def _assistant_intervals(session: _SessionState) -> list[tuple[int, int]]:
-    return sorted(
-        [
-            (msg.time_created_ms, msg.time_ended_ms)
-            for msg in session.messages
-            if msg.role == "assistant" and msg.time_ended_ms > msg.time_created_ms
-        ]
-    )
-
-
-def _move_session_to_front(priority: list[str], session_id: str) -> None:
-    try:
-        priority.remove(session_id)
-    except ValueError:
-        pass
-    priority.insert(0, session_id)
-
-
-def _choose_focus(active: list[_Burst], priority: list[str]) -> _Burst:
-    active_by_session = {burst.session.raw_session_id: burst for burst in active}
-    for session_id in priority:
-        burst = active_by_session.get(session_id)
-        if burst is not None:
-            return burst
-    return min(active, key=_burst_fallback_key)
-
-
-def _session_priority_key(session: _SessionState) -> tuple[int, int, str]:
-    return (
-        1 if session.is_child else 0,
-        -session.created_ms,
-        session.raw_session_id,
-    )
-
-
-def _burst_fallback_key(burst: _Burst) -> tuple[int, int, str]:
-    return (
-        1 if burst.session.is_child else 0,
-        -burst.start_ms,
-        burst.session.raw_session_id,
-    )
-
-
-def _merge_adjacent_events(events: list[Event]) -> list[Event]:
-    if not events:
-        return []
-    merged = [events[0]]
-    for event in events[1:]:
-        previous = merged[-1]
-        previous_end_ms = _datetime_to_ms(previous.timestamp) + int(previous.duration * 1000)
-        current_start_ms = _datetime_to_ms(event.timestamp)
-        if previous.data == event.data and previous_end_ms == current_start_ms:
-            merged[-1] = Event(
-                timestamp=previous.timestamp,
-                duration=previous.duration + event.duration,
-                data=previous.data,
+        model = message.model_id or session.model_id
+        role = message.role or "unknown"
+        events.append(
+            Event(
+                timestamp=_iso_from_ms(event_start_ms),
+                duration=(event_end_ms - event_start_ms) / 1000.0,
+                data={
+                    "kind": _workspace_message_kind(role),
+                    "workspace": "session-buckets",
+                    "source": SOURCE_NAME,
+                    "project": session.project,
+                    "session_id": session.raw_session_id,
+                    "root_session_id": session.root_session_id,
+                    "parent_session_id": session.parent_session_id,
+                    "is_child": session.is_child,
+                    "message_id": message.message_id,
+                    "message_index": index,
+                    "role": role,
+                    "app": TOOL_NAME,
+                    "title": session.title,
+                    "session_title": session.title,
+                    "session_label": session.focus_label,
+                    "message_title": _workspace_message_title(role, model),
+                    "model": model,
+                    "provider": message.provider_id or session.provider_id,
+                    "agent": message.agent or session.agent,
+                    "input_tokens": message.tokens["input"],
+                    "output_tokens": message.tokens["output"],
+                    "reasoning_tokens": message.tokens["reasoning"],
+                    "cache_read_tokens": message.tokens["cache_read"],
+                    "cache_write_tokens": message.tokens["cache_write"],
+                    "tokens_total": message.tokens_total,
+                    "cost": message.cost,
+                },
             )
-            continue
-        merged.append(event)
-    return merged
+        )
+    if events:
+        return events
+    return _build_session_active_fallback(
+        session=session,
+        start_ms=start_ms,
+        end_ms=end_ms,
+        session_max_created=session_max_created,
+    )
+
+
+def _build_session_active_fallback(
+    *,
+    session: _SessionState,
+    start_ms: int,
+    end_ms: int,
+    session_max_created: dict[str, int],
+) -> list[Event]:
+    active_start_ms = max(start_ms, session.created_ms)
+    latest_created = max(active_start_ms, session_max_created.get(session.raw_session_id, active_start_ms))
+    assistant_messages = [
+        message
+        for message in session.messages
+        if message.role == "assistant" and message.time_ended_ms > message.time_created_ms
+    ]
+    totals = _session_totals(assistant_messages)
+    last_response_end_ms = max(
+        [message.time_ended_ms for message in assistant_messages],
+        default=active_start_ms,
+    )
+    active_end_ms = max(active_start_ms + MIN_WORKSPACE_EVENT_DURATION_MS, latest_created, last_response_end_ms)
+    active_end_ms = min(end_ms, active_end_ms)
+    if active_end_ms <= active_start_ms:
+        return []
+    return [
+        Event(
+            timestamp=_iso_from_ms(active_start_ms),
+            duration=(active_end_ms - active_start_ms) / 1000.0,
+            data={
+                "kind": "session.active",
+                "workspace": "session-buckets",
+                "source": SOURCE_NAME,
+                "project": session.project,
+                "session_id": session.raw_session_id,
+                "root_session_id": session.root_session_id,
+                "parent_session_id": session.parent_session_id,
+                "is_child": session.is_child,
+                "app": TOOL_NAME,
+                "title": session.title,
+                "session_title": session.title,
+                "session_label": session.focus_label,
+                "model": session.model_id,
+                "provider": session.provider_id,
+                "agent": session.agent,
+                "response_count": len(assistant_messages),
+                "input_tokens": totals["input"],
+                "output_tokens": totals["output"],
+                "reasoning_tokens": totals["reasoning"],
+                "cache_read_tokens": totals["cache_read"],
+                "cache_write_tokens": totals["cache_write"],
+            },
+        )
+    ]
+
+
+def _workspace_message_end_ms(
+    message: _RawMessage,
+    *,
+    next_message_start_ms: int | None,
+) -> int:
+    ended_ms = max(message.time_created_ms, message.time_ended_ms)
+    if message.role == "assistant":
+        return max(message.time_created_ms + MIN_WORKSPACE_EVENT_DURATION_MS, ended_ms)
+    marker_end_ms = message.time_created_ms + MIN_WORKSPACE_EVENT_DURATION_MS
+    if next_message_start_ms is not None:
+        marker_end_ms = min(marker_end_ms, next_message_start_ms)
+    return max(message.time_created_ms, marker_end_ms)
+
+
+def _workspace_message_kind(role: str) -> str:
+    normalized = role.strip().lower() if role else "unknown"
+    return f"message.{normalized}"
+
+
+def _workspace_message_title(role: str, model: str | None) -> str:
+    normalized = role.strip().lower() if role else "unknown"
+    if normalized == "assistant" and model:
+        return f"assistant · {model}"
+    return normalized
+
+
+def _session_totals(messages: list[_RawMessage]) -> dict[str, int]:
+    totals = {
+        "input": 0,
+        "output": 0,
+        "reasoning": 0,
+        "cache_read": 0,
+        "cache_write": 0,
+    }
+    for message in messages:
+        totals["input"] += message.tokens["input"]
+        totals["output"] += message.tokens["output"]
+        totals["reasoning"] += message.tokens["reasoning"]
+        totals["cache_read"] += message.tokens["cache_read"]
+        totals["cache_write"] += message.tokens["cache_write"]
+    return totals
+
+
+def _bucket_label(value: str) -> str:
+    compact = " ".join(value.split())
+    if len(compact) <= 72:
+        return compact
+    return f"{compact[:69].rstrip()}..."
 
 
 def _query_messages(connection: sqlite3.Connection, start_ms: int, end_ms: int) -> list[sqlite3.Row]:
@@ -675,12 +750,6 @@ def _extract_tokens(payload: dict[str, Any]) -> dict[str, int]:
         "cache_read": _coerce_int(cache.get("read") if isinstance(cache, dict) else None) or 0,
         "cache_write": _coerce_int(cache.get("write") if isinstance(cache, dict) else None) or 0,
     }
-
-
-def _compose_title(focus_label: str) -> str:
-    return focus_label
-
-
 def _short_label(title: str) -> str:
     compact = " ".join(title.strip().split())
     if " (@" in compact:
@@ -705,10 +774,6 @@ def _day_bounds_ms(target_date: date) -> tuple[int, int]:
 
 def _iso_from_ms(timestamp_ms: int) -> str:
     return datetime.fromtimestamp(timestamp_ms / 1000, tz=timezone.utc).isoformat()
-
-
-def _datetime_to_ms(timestamp: str) -> int:
-    return int(datetime.fromisoformat(timestamp).timestamp() * 1000)
 
 
 def _dominant_value(values: list[str | None], weights: list[int]) -> str | None:
