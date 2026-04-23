@@ -3,18 +3,22 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>aw-watcher-llm</title>
+    <title>aw-watcher-llm standalone</title>
     <link rel="stylesheet" href="./styles.css">
   </head>
-  <body>
-    <div class="page">
-      <header class="toolbar">
+  <body data-mode="standalone">
+    <div class="page page-standalone">
+      <header class="toolbar standalone-toolbar">
         <div class="titlebar">
-          <p class="eyebrow">ActivityWatch Custom Visualization</p>
+          <p class="eyebrow">Standalone Dashboard</p>
           <h1>LLM Session Lanes</h1>
         </div>
 
-        <div class="controls">
+        <div class="controls controls-standalone">
+          <label>
+            <span>AW URL</span>
+            <input id="aw-url-input" type="url" value="http://127.0.0.1:5600" placeholder="http://127.0.0.1:5600">
+          </label>
           <label>
             <span>Host</span>
             <input id="host-input" type="text" value="" placeholder="Loading hostname...">
@@ -40,7 +44,6 @@
               <option value="all">All Sources</option>
             </select>
           </label>
-          <a class="secondary-action" href="./standalone.html" target="_blank" rel="noreferrer">Open Standalone</a>
           <button id="load-button" type="button">Reload</button>
         </div>
       </header>
@@ -69,7 +72,7 @@
         </article>
       </section>
 
-      <section class="chart-frame">
+      <section class="chart-frame chart-frame-standalone">
         <div class="chart-header chart-header-focus">
           <div>
             <h2 id="focus-title">Source Activity</h2>
@@ -84,12 +87,12 @@
             <p id="lanes-caption"></p>
           </div>
         </div>
-        <div class="lanes-shell">
+        <div class="lanes-shell lanes-shell-standalone">
           <div id="lanes-root" class="lanes-root"></div>
         </div>
       </section>
 
-      <section class="inspector-strip">
+      <section class="inspector-strip inspector-strip-standalone">
         <div class="inspector-header">
           <h2>Inspector</h2>
         </div>

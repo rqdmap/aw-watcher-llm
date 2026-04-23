@@ -1,5 +1,9 @@
 # Custom Visual Design
 
+Note: this design doc predates the raw-only refactor. The current code no
+longer persists a display bucket; the visualization rebuilds focus and lane
+views from raw `response.completed` events at runtime.
+
 This document defines the first custom visualization for `aw-watcher-llm`.
 
 The goal is not to replace ActivityWatch's default timeline. The goal is to add

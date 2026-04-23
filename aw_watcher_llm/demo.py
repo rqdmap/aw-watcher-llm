@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-from .buckets import DISPLAY_BUCKET_TYPE
 from .buckets import RAW_BUCKET_TYPE
 from .buckets import default_host
-from .buckets import focus_bucket_id
 from .buckets import raw_bucket_id
 from .schema import BucketSpec
 from .schema import Event
@@ -19,13 +17,6 @@ def build_demo_payload(host: str | None = None, source: str = "opencode") -> Wat
         client="aw-watcher-llm",
         hostname=resolved_host,
         name=f"LLM raw events ({source})",
-    )
-    display_bucket = BucketSpec(
-        id=focus_bucket_id(resolved_host),
-        type=DISPLAY_BUCKET_TYPE,
-        client="aw-watcher-llm",
-        hostname=resolved_host,
-        name="LLM focus timeline",
     )
     raw_events = [
         Event(
@@ -126,23 +117,9 @@ def build_demo_payload(host: str | None = None, source: str = "opencode") -> Wat
             },
         ),
     ]
-    display_events = [
-        Event(
-            timestamp="2026-04-22T10:01:00Z",
-            duration=60.0,
-            data={
-                "app": tool_name,
-                "title": "snapshot fix",
-                "source": source,
-                "project": "ghostwire",
-            },
-        ),
-    ]
     return WatcherPayload(
         raw_bucket=raw_bucket,
-        display_bucket=display_bucket,
         raw_events=raw_events,
-        display_events=display_events,
     )
 
 

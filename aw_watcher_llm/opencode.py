@@ -24,6 +24,7 @@ from .schema import WatcherPayload
 
 DEFAULT_GAP_MINUTES = 10
 MIN_WORKSPACE_EVENT_DURATION_MS = 1000
+MAX_FALLBACK_RESPONSE_DURATION_MS = 60 * 60 * 1000
 CLIENT_NAME = "aw-watcher-llm"
 SOURCE_NAME = "opencode"
 TOOL_NAME = "OpenCode"
@@ -180,11 +181,13 @@ def _build_raw_messages(
             created_ms = _coerce_int(row["time_created"])
         if created_ms is None:
             continue
+        tokens = _extract_tokens(payload)
         ended_ms = _resolve_message_end_ms(
             payload=payload,
             created_ms=created_ms,
             row_time_updated=_coerce_int(row["time_updated"]),
             part_extent=part_extents.get(str(row["message_id"])),
+            tokens=tokens,
         )
         out.append(
             _RawMessage(
@@ -201,7 +204,7 @@ def _build_raw_messages(
                 model_id=_nonempty_str(payload.get("modelID")),
                 provider_id=_nonempty_str(payload.get("providerID")),
                 agent=_nonempty_str(payload.get("agent")),
-                tokens=_extract_tokens(payload),
+                tokens=tokens,
                 cost=_coerce_float(payload.get("cost")),
             )
         )
@@ -656,14 +659,31 @@ def _resolve_message_end_ms(
     created_ms: int,
     row_time_updated: int | None,
     part_extent: int | None,
+    tokens: dict[str, int],
 ) -> int:
     completed = _coerce_int(payload.get("time", {}).get("completed"))
     if completed is not None and completed >= created_ms:
         return completed
-    if part_extent is not None and part_extent >= created_ms:
-        return part_extent
-    if row_time_updated is not None and row_time_updated >= created_ms:
-        return row_time_updated
+
+    fallback_end = None
+    candidates = [value for value in (part_extent, row_time_updated) if value is not None and value >= created_ms]
+    if candidates:
+        fallback_end = max(candidates)
+
+    finish = _nonempty_str(payload.get("finish"))
+    tokens_total = (
+        tokens["input"]
+        + tokens["output"]
+        + tokens["reasoning"]
+        + tokens["cache_read"]
+        + tokens["cache_write"]
+    )
+    if tokens_total == 0 and not finish:
+        return created_ms
+    if fallback_end is not None:
+        if fallback_end - created_ms > MAX_FALLBACK_RESPONSE_DURATION_MS:
+            return created_ms + MIN_WORKSPACE_EVENT_DURATION_MS
+        return fallback_end
     return created_ms
 
 

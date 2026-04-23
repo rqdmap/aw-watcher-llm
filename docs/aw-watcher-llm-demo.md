@@ -1,5 +1,9 @@
 # AW Watcher LLM Demo
 
+Note: this document describes an earlier prototype that still persisted a
+display bucket. The current implementation is raw-only; any `display` sections
+below are historical context.
+
 This document is a concrete `aw-watcher-llm` v0.1 demo.
 
 The design goal is:

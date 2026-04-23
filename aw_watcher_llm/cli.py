@@ -17,6 +17,8 @@ from .buckets import default_host
 from .buckets import raw_bucket_id
 from .buckets import session_bucket_prefix
 from .buckets import session_workspace_host
+from .codex import collect_payload as collect_codex_payload
+from .codex import find_sessions_dir as find_codex_sessions_dir
 from .demo import build_demo_payload
 from .opencode import collect_payload as collect_opencode_payload
 from .opencode import collect_session_buckets as collect_opencode_session_buckets
@@ -45,9 +47,18 @@ def main() -> int:
     opencode_json.add_argument("--db-path", type=Path)
     opencode_json.add_argument("--pretty", action="store_true")
 
+    codex_json = subparsers.add_parser(
+        "codex-json",
+        help="read local Codex rollout sessions and print real events",
+    )
+    _add_host_argument(codex_json)
+    codex_json.add_argument("--date", dest="target_date", type=_parse_date, default=date.today())
+    codex_json.add_argument("--sessions-dir", type=Path)
+    codex_json.add_argument("--pretty", action="store_true")
+
     opencode_session_buckets_json = subparsers.add_parser(
         "opencode-session-buckets-json",
-        help="build one workspace bucket per OpenCode session for a day",
+        help="build the optional session-workspace projection for a day",
     )
     _add_host_argument(opencode_session_buckets_json)
     opencode_session_buckets_json.add_argument("--date", dest="target_date", type=_parse_date, default=date.today())
@@ -72,9 +83,26 @@ def main() -> int:
     )
     opencode_push.add_argument("--pretty", action="store_true")
 
+    codex_push = subparsers.add_parser(
+        "codex-push",
+        help="read real Codex events and push them into ActivityWatch",
+    )
+    _add_host_argument(codex_push)
+    codex_push.add_argument("--date", dest="target_date", type=_parse_date, default=date.today())
+    codex_push.add_argument("--sessions-dir", type=Path)
+    codex_push.add_argument("--aw-url", default="http://127.0.0.1:5600")
+    codex_push.add_argument("--timeout-seconds", type=float, default=10.0)
+    codex_push.add_argument(
+        "--replace-day",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="replace only the same local-day window before inserting",
+    )
+    codex_push.add_argument("--pretty", action="store_true")
+
     opencode_session_buckets_push = subparsers.add_parser(
         "opencode-session-buckets-push",
-        help="push one workspace bucket per OpenCode session into ActivityWatch",
+        help="push the optional session-workspace projection into ActivityWatch",
     )
     _add_host_argument(opencode_session_buckets_push)
     opencode_session_buckets_push.add_argument("--date", dest="target_date", type=_parse_date, default=date.today())
@@ -108,9 +136,27 @@ def main() -> int:
     )
     opencode_backfill.add_argument("--pretty", action="store_true")
 
+    codex_backfill = subparsers.add_parser(
+        "codex-backfill",
+        help="push a rolling window of Codex raw events into ActivityWatch",
+    )
+    _add_host_argument(codex_backfill)
+    codex_backfill.add_argument("--end-date", dest="target_date", type=_parse_date, default=date.today())
+    codex_backfill.add_argument("--days", type=int, default=30)
+    codex_backfill.add_argument("--sessions-dir", type=Path)
+    codex_backfill.add_argument("--aw-url", default="http://127.0.0.1:5600")
+    codex_backfill.add_argument("--timeout-seconds", type=float, default=10.0)
+    codex_backfill.add_argument(
+        "--replace-day",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="replace only the same local-day window before inserting",
+    )
+    codex_backfill.add_argument("--pretty", action="store_true")
+
     opencode_session_buckets_backfill = subparsers.add_parser(
         "opencode-session-buckets-backfill",
-        help="backfill the per-session workspace buckets for a rolling window",
+        help="backfill the optional session-workspace projection for a rolling window",
     )
     _add_host_argument(opencode_session_buckets_backfill)
     opencode_session_buckets_backfill.add_argument("--end-date", dest="target_date", type=_parse_date, default=date.today())
@@ -150,9 +196,32 @@ def main() -> int:
     )
     opencode_watch.add_argument("--pretty", action="store_true")
 
+    codex_watch = subparsers.add_parser(
+        "codex-watch",
+        help="run a polling watcher that refreshes today's Codex raw events",
+    )
+    _add_host_argument(codex_watch)
+    codex_watch.add_argument("--sessions-dir", type=Path)
+    codex_watch.add_argument("--aw-url", default="http://127.0.0.1:5600")
+    codex_watch.add_argument("--timeout-seconds", type=float, default=10.0)
+    codex_watch.add_argument("--interval-seconds", type=float, default=15.0)
+    codex_watch.add_argument(
+        "--replace-day",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="replace only the same local-day window before inserting",
+    )
+    codex_watch.add_argument(
+        "--iterations",
+        type=int,
+        default=0,
+        help="stop after N polling cycles (0 means run forever)",
+    )
+    codex_watch.add_argument("--pretty", action="store_true")
+
     opencode_session_buckets_watch = subparsers.add_parser(
         "opencode-session-buckets-watch",
-        help="poll and refresh the per-session workspace buckets for today's OpenCode activity",
+        help="poll and refresh the optional session-workspace projection for today's activity",
     )
     _add_host_argument(opencode_session_buckets_watch)
     opencode_session_buckets_watch.add_argument("--db-path", type=Path)
@@ -195,6 +264,13 @@ def main() -> int:
             db_path=args.db_path,
             pretty=args.pretty,
         )
+    if args.command == "codex-json":
+        return _cmd_codex_json(
+            host=args.host,
+            target_date=args.target_date,
+            sessions_dir=args.sessions_dir,
+            pretty=args.pretty,
+        )
     if args.command == "opencode-session-buckets-json":
         return _cmd_opencode_session_buckets_json(
             host=args.host,
@@ -208,6 +284,16 @@ def main() -> int:
             host=args.host,
             target_date=args.target_date,
             db_path=args.db_path,
+            aw_url=args.aw_url,
+            timeout_seconds=args.timeout_seconds,
+            replace_day=args.replace_day,
+            pretty=args.pretty,
+        )
+    if args.command == "codex-push":
+        return _cmd_codex_push(
+            host=args.host,
+            target_date=args.target_date,
+            sessions_dir=args.sessions_dir,
             aw_url=args.aw_url,
             timeout_seconds=args.timeout_seconds,
             replace_day=args.replace_day,
@@ -235,6 +321,17 @@ def main() -> int:
             replace_day=args.replace_day,
             pretty=args.pretty,
         )
+    if args.command == "codex-backfill":
+        return _cmd_codex_backfill(
+            host=args.host,
+            target_date=args.target_date,
+            days=args.days,
+            sessions_dir=args.sessions_dir,
+            aw_url=args.aw_url,
+            timeout_seconds=args.timeout_seconds,
+            replace_day=args.replace_day,
+            pretty=args.pretty,
+        )
     if args.command == "opencode-session-buckets-backfill":
         return _cmd_opencode_session_buckets_backfill(
             host=args.host,
@@ -251,6 +348,17 @@ def main() -> int:
         return _cmd_opencode_watch(
             host=args.host,
             db_path=args.db_path,
+            aw_url=args.aw_url,
+            timeout_seconds=args.timeout_seconds,
+            interval_seconds=args.interval_seconds,
+            replace_day=args.replace_day,
+            iterations=args.iterations,
+            pretty=args.pretty,
+        )
+    if args.command == "codex-watch":
+        return _cmd_codex_watch(
+            host=args.host,
+            sessions_dir=args.sessions_dir,
             aw_url=args.aw_url,
             timeout_seconds=args.timeout_seconds,
             interval_seconds=args.interval_seconds,
@@ -337,6 +445,26 @@ def _cmd_opencode_json(
     return _print_payload(payload, pretty=pretty)
 
 
+def _cmd_codex_json(
+    *,
+    host: str,
+    target_date: date,
+    sessions_dir: Path | None,
+    pretty: bool,
+) -> int:
+    host = _resolve_local_host(host)
+    resolved = sessions_dir or find_codex_sessions_dir()
+    if resolved is None:
+        print("no Codex sessions directory found", file=sys.stderr)
+        return 1
+    payload = collect_codex_payload(
+        host=host,
+        target_date=target_date,
+        sessions_dir=resolved,
+    ).to_dict()
+    return _print_payload(payload, pretty=pretty)
+
+
 def _cmd_opencode_session_buckets_json(
     *,
     host: str,
@@ -407,6 +535,57 @@ def _cmd_opencode_push(
         "host": host,
         "date": target_date.isoformat(),
         "db_path": str(resolved),
+        "replace_day": replace_day,
+        "summary": summary.to_dict(),
+        "raw_bucket": payload.raw_bucket.to_dict(),
+    }
+    if pretty:
+        print(json.dumps(output, indent=2, ensure_ascii=False))
+    else:
+        print(json.dumps(output, ensure_ascii=False))
+    return 0
+
+
+def _cmd_codex_push(
+    *,
+    host: str,
+    target_date: date,
+    sessions_dir: Path | None,
+    aw_url: str,
+    timeout_seconds: float,
+    replace_day: bool,
+    pretty: bool,
+) -> int:
+    host = _resolve_push_host(host, aw_url=aw_url, timeout_seconds=timeout_seconds)
+    resolved = sessions_dir or find_codex_sessions_dir()
+    if resolved is None:
+        print("no Codex sessions directory found", file=sys.stderr)
+        return 1
+    payload = collect_codex_payload(
+        host=host,
+        target_date=target_date,
+        sessions_dir=resolved,
+    )
+    replace_start = None
+    replace_end = None
+    if replace_day:
+        start, end = local_day_bounds(target_date)
+        replace_start = start.isoformat()
+        replace_end = end.isoformat()
+    transport = ActivityWatchTransport(
+        base_url=aw_url,
+        timeout_seconds=timeout_seconds,
+    )
+    summary = transport.push_payload(
+        payload,
+        replace_start=replace_start,
+        replace_end=replace_end,
+    )
+    output: dict[str, Any] = {
+        "aw_url": aw_url,
+        "host": host,
+        "date": target_date.isoformat(),
+        "sessions_dir": str(resolved),
         "replace_day": replace_day,
         "summary": summary.to_dict(),
         "raw_bucket": payload.raw_bucket.to_dict(),
@@ -523,6 +702,72 @@ def _cmd_opencode_backfill(
         "days": days,
         "end_date": target_date.isoformat(),
         "db_path": str(resolved),
+        "replace_day": replace_day,
+        "summary": {
+            "raw_inserted": total_inserted,
+            "raw_deleted": total_deleted,
+        },
+        "items": items,
+    }
+    if pretty:
+        print(json.dumps(output, indent=2, ensure_ascii=False))
+    else:
+        print(json.dumps(output, ensure_ascii=False))
+    return 0
+
+
+def _cmd_codex_backfill(
+    *,
+    host: str,
+    target_date: date,
+    days: int,
+    sessions_dir: Path | None,
+    aw_url: str,
+    timeout_seconds: float,
+    replace_day: bool,
+    pretty: bool,
+) -> int:
+    if days <= 0:
+        print("--days must be positive", file=sys.stderr)
+        return 1
+    host = _resolve_push_host(host, aw_url=aw_url, timeout_seconds=timeout_seconds)
+    resolved = sessions_dir or find_codex_sessions_dir()
+    if resolved is None:
+        print("no Codex sessions directory found", file=sys.stderr)
+        return 1
+    transport = ActivityWatchTransport(base_url=aw_url, timeout_seconds=timeout_seconds)
+    items: list[dict[str, Any]] = []
+    total_inserted = 0
+    total_deleted = 0
+    for offset in range(days - 1, -1, -1):
+        day = target_date - timedelta(days=offset)
+        payload = collect_codex_payload(host=host, target_date=day, sessions_dir=resolved)
+        replace_start = None
+        replace_end = None
+        if replace_day:
+            start, end = local_day_bounds(day)
+            replace_start = start.isoformat()
+            replace_end = end.isoformat()
+        summary = transport.push_payload(
+            payload,
+            replace_start=replace_start,
+            replace_end=replace_end,
+        )
+        total_inserted += summary.raw_inserted
+        total_deleted += summary.raw_deleted
+        items.append(
+            {
+                "date": day.isoformat(),
+                "raw_inserted": summary.raw_inserted,
+                "raw_deleted": summary.raw_deleted,
+            }
+        )
+    output = {
+        "aw_url": aw_url,
+        "host": host,
+        "days": days,
+        "end_date": target_date.isoformat(),
+        "sessions_dir": str(resolved),
         "replace_day": replace_day,
         "summary": {
             "raw_inserted": total_inserted,
@@ -658,6 +903,69 @@ def _cmd_opencode_watch(
             "host": host,
             "date": target_date.isoformat(),
             "db_path": str(resolved),
+            "replace_day": replace_day,
+            "summary": summary.to_dict(),
+            "raw_bucket": payload.raw_bucket.to_dict(),
+        }
+        if pretty:
+            print(json.dumps(output, indent=2, ensure_ascii=False))
+        else:
+            print(json.dumps(output, ensure_ascii=False))
+        count += 1
+        if iterations and count >= iterations:
+            return 0
+        try:
+            import time as _time
+
+            _time.sleep(interval_seconds)
+        except KeyboardInterrupt:
+            return 0
+
+
+def _cmd_codex_watch(
+    *,
+    host: str,
+    sessions_dir: Path | None,
+    aw_url: str,
+    timeout_seconds: float,
+    interval_seconds: float,
+    replace_day: bool,
+    iterations: int,
+    pretty: bool,
+) -> int:
+    if interval_seconds <= 0:
+        print("--interval-seconds must be positive", file=sys.stderr)
+        return 1
+    if iterations < 0:
+        print("--iterations must be >= 0", file=sys.stderr)
+        return 1
+    host = _resolve_push_host(host, aw_url=aw_url, timeout_seconds=timeout_seconds)
+    resolved = sessions_dir or find_codex_sessions_dir()
+    if resolved is None:
+        print("no Codex sessions directory found", file=sys.stderr)
+        return 1
+    transport = ActivityWatchTransport(base_url=aw_url, timeout_seconds=timeout_seconds)
+    count = 0
+    while True:
+        now = datetime.now().astimezone()
+        target_date = now.date()
+        payload = collect_codex_payload(host=host, target_date=target_date, sessions_dir=resolved)
+        replace_start = None
+        replace_end = None
+        if replace_day:
+            start, end = local_day_bounds(target_date)
+            replace_start = start.isoformat()
+            replace_end = end.isoformat()
+        summary = transport.push_payload(
+            payload,
+            replace_start=replace_start,
+            replace_end=replace_end,
+        )
+        output = {
+            "timestamp": now.isoformat(),
+            "host": host,
+            "date": target_date.isoformat(),
+            "sessions_dir": str(resolved),
             "replace_day": replace_day,
             "summary": summary.to_dict(),
             "raw_bucket": payload.raw_bucket.to_dict(),

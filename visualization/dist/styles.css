@@ -30,6 +30,12 @@ body {
   min-width: 0;
 }
 
+body[data-mode="standalone"] {
+  background:
+    radial-gradient(circle at top left, rgba(23, 107, 135, 0.08), transparent 28%),
+    linear-gradient(180deg, #f8f3eb, #f3ece1);
+}
+
 h1,
 h2,
 p,
@@ -52,6 +58,12 @@ h2 {
   padding: 6px 8px 10px;
 }
 
+.page-standalone {
+  max-width: 1680px;
+  margin: 0 auto;
+  padding: 20px 22px 28px;
+}
+
 .eyebrow {
   margin-bottom: 2px;
   color: var(--muted);
@@ -67,6 +79,10 @@ h2 {
   gap: 12px;
 }
 
+.standalone-toolbar {
+  align-items: start;
+}
+
 .controls {
   display: flex;
   flex-wrap: wrap;
@@ -78,6 +94,10 @@ h2 {
 .controls label {
   display: grid;
   gap: 4px;
+}
+
+.controls label.is-disabled {
+  opacity: 0.58;
 }
 
 .controls span {
@@ -99,11 +119,32 @@ h2 {
   font: inherit;
 }
 
+.secondary-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 34px;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--ink);
+  font: inherit;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
 #host-input {
   min-width: 190px;
 }
 
+#aw-url-input {
+  min-width: 240px;
+}
+
 #date-input,
+#view-mode-select,
+#days-input,
 #source-select {
   min-width: 126px;
 }
@@ -116,11 +157,77 @@ h2 {
   font-weight: 600;
 }
 
+.controls input:disabled,
+.controls select:disabled {
+  cursor: not-allowed;
+}
+
 .summary-strip {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
   margin-top: 8px;
+}
+
+.overview-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.overview-panel {
+  padding: 10px;
+  border: 1px solid rgba(221, 210, 194, 0.95);
+  border-radius: 16px;
+  background: linear-gradient(180deg, rgba(255, 252, 247, 0.98), rgba(249, 244, 237, 0.92));
+  box-shadow: var(--shadow);
+}
+
+.metric-breakdown {
+  display: grid;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.breakdown-row {
+  display: grid;
+  gap: 6px;
+}
+
+.breakdown-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.breakdown-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.breakdown-meta {
+  color: var(--muted);
+  font-size: 11px;
+  text-align: right;
+}
+
+.breakdown-bar-shell {
+  overflow: hidden;
+  height: 12px;
+  border-radius: 999px;
+  background: rgba(30, 28, 26, 0.08);
+}
+
+.breakdown-bar {
+  height: 100%;
+  min-width: 6px;
+  border-radius: inherit;
 }
 
 .summary-card {
@@ -156,6 +263,10 @@ h2 {
   box-shadow: var(--shadow);
 }
 
+.chart-frame-standalone {
+  padding: 16px 18px 18px;
+}
+
 .chart-header {
   display: flex;
   justify-content: space-between;
@@ -174,34 +285,90 @@ h2 {
 }
 
 .focus-ribbon {
-  display: flex;
-  align-items: center;
+  display: grid;
+  gap: 8px;
   min-height: 52px;
   padding: 8px 0 10px;
   border-bottom: 1px solid rgba(221, 210, 194, 0.9);
 }
 
-.focus-segment {
-  display: inline-flex;
-  align-items: center;
-  min-height: 38px;
-  margin-right: 4px;
-  padding: 0 12px;
-  border-radius: 10px;
-  color: #fff;
-  font-weight: 600;
-  white-space: nowrap;
-  overflow: hidden;
+body[data-mode="standalone"] .focus-ribbon {
+  min-height: 68px;
 }
 
-.focus-segment small {
-  margin-left: 6px;
-  opacity: 0.82;
-  font-weight: 500;
+.activity-row {
+  display: grid;
+  grid-template-columns: 150px minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+}
+
+.activity-label {
+  display: grid;
+  gap: 2px;
+}
+
+.activity-label strong {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  font-size: 13px;
+}
+
+.activity-label span {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.source-dot,
+.source-pill::before {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  background: var(--focus);
+  content: "";
+  flex: 0 0 auto;
+}
+
+.activity-track {
+  position: relative;
+  height: 30px;
+  overflow: hidden;
+  border-radius: 999px;
+  background:
+    linear-gradient(to right, rgba(23, 107, 135, 0.05), rgba(23, 107, 135, 0.01)),
+    repeating-linear-gradient(
+      to right,
+      transparent 0,
+      transparent calc(12.5% - 1px),
+      rgba(30, 28, 26, 0.05) calc(12.5% - 1px),
+      rgba(30, 28, 26, 0.05) 12.5%
+    );
+}
+
+.activity-burst {
+  position: absolute;
+  top: 5px;
+  height: 20px;
+  border-radius: 999px;
+}
+
+.activity-tick {
+  position: absolute;
+  top: 4px;
+  width: 2px;
+  height: 22px;
+  border-radius: 999px;
 }
 
 .lanes-shell {
   padding-top: 8px;
+}
+
+.lanes-shell-standalone {
+  padding-top: 12px;
 }
 
 .lanes-root {
@@ -215,6 +382,10 @@ h2 {
   align-items: center;
   padding: 6px 0;
   border-top: 1px solid rgba(221, 210, 194, 0.75);
+}
+
+body[data-mode="standalone"] .lane-row {
+  grid-template-columns: 260px minmax(1000px, 1fr);
 }
 
 .lane-row:first-child {
@@ -245,6 +416,24 @@ h2 {
 .lane-title {
   font-size: 14px;
   line-height: 1.12;
+}
+
+.lane-topline {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.source-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  white-space: nowrap;
 }
 
 .lane-meta {
@@ -292,6 +481,10 @@ h2 {
   background: var(--surface-soft);
 }
 
+.inspector-strip-standalone {
+  padding: 12px 14px;
+}
+
 .inspector-header {
   margin-bottom: 6px;
 }
@@ -306,7 +499,7 @@ h2 {
 
 .inspector-grid {
   display: grid;
-  grid-template-columns: repeat(6, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
   gap: 8px;
 }
 
@@ -329,6 +522,13 @@ h2 {
   display: block;
   margin-top: 4px;
   font-size: 14px;
+}
+
+.inspector-note-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 8px;
+  margin-top: 8px;
 }
 
 .status-panel {
@@ -376,16 +576,20 @@ h2 {
     align-items: stretch;
   }
 
+  .overview-grid {
+    grid-template-columns: 1fr;
+  }
+
   .controls {
     justify-content: stretch;
   }
 
-  .lane-row {
+  .activity-row {
     grid-template-columns: 1fr;
   }
 
-  .inspector-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+  .lane-row {
+    grid-template-columns: 1fr;
   }
 }
 
@@ -396,12 +600,11 @@ h2 {
 
   #host-input,
   #date-input,
+  #view-mode-select,
+  #days-input,
   #source-select,
+  .secondary-action,
   .controls button {
     width: 100%;
-  }
-
-  .inspector-grid {
-    grid-template-columns: 1fr;
   }
 }
