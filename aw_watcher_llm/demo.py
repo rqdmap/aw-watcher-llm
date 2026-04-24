@@ -131,4 +131,6 @@ def _tool_name(source: str) -> str:
         return "Claude Code"
     if normalized == "codex":
         return "Codex"
+    if normalized == "qoder":
+        return "Qoder"
     raise ValueError(f"unsupported source: {source}")

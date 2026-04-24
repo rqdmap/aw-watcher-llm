@@ -11,12 +11,14 @@ const SOURCE_LABELS = {
   opencode: "OpenCode",
   claudecode: "Claude Code",
   codex: "Codex",
+  qoder: "Qoder",
 };
 
 const SOURCE_COLORS = {
   opencode: "var(--opencode)",
   claudecode: "var(--claudecode)",
   codex: "var(--codex)",
+  qoder: "var(--qoder)",
 };
 
 const state = {

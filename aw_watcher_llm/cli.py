@@ -23,12 +23,81 @@ from .demo import build_demo_payload
 from .opencode import collect_payload as collect_opencode_payload
 from .opencode import collect_session_buckets as collect_opencode_session_buckets
 from .opencode import find_db as find_opencode_db
+from .qoder import collect_payload as collect_qoder_payload
+from .qoder import find_projects_dir as find_qoder_projects_dir
+from .runner import WATCHER_SOURCES
+from .runner import RunConfig
+from .runner import configure_logging
+from .runner import run_service
 from .visualization_server import serve_visualization
 
+KNOWN_COMMANDS = {
+    "run",
+    "bucket-ids",
+    "demo-json",
+    "opencode-json",
+    "codex-json",
+    "qoder-json",
+    "opencode-session-buckets-json",
+    "opencode-push",
+    "codex-push",
+    "qoder-push",
+    "opencode-session-buckets-push",
+    "opencode-backfill",
+    "codex-backfill",
+    "qoder-backfill",
+    "opencode-session-buckets-backfill",
+    "opencode-watch",
+    "codex-watch",
+    "qoder-watch",
+    "opencode-session-buckets-watch",
+    "visualize-serve",
+}
 
-def main() -> int:
+
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="aw-watcher-llm")
     subparsers = parser.add_subparsers(dest="command", required=True)
+
+    run = subparsers.add_parser(
+        "run",
+        help="run the long-lived watcher service (default when no subcommand is given)",
+    )
+    _add_host_argument(run)
+    run.add_argument(
+        "--source",
+        dest="sources",
+        action="append",
+        choices=WATCHER_SOURCES,
+        help="watch a source (repeat to watch multiple sources, defaults to all supported sources)",
+    )
+    run.add_argument("--db-path", type=Path)
+    run.add_argument("--sessions-dir", type=Path)
+    run.add_argument("--qoder-projects-dir", type=Path)
+    run.add_argument("--aw-url", default="http://127.0.0.1:5600")
+    run.add_argument("--timeout-seconds", type=float, default=10.0)
+    run.add_argument("--interval-seconds", type=float, default=15.0)
+    run.add_argument("--backfill-days", type=int, default=2)
+    run.add_argument(
+        "--replace-day",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="replace only the same local-day window before inserting",
+    )
+    run.add_argument(
+        "--enable-session-workspace",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="also push the optional OpenCode per-session workspace buckets",
+    )
+    _add_include_child_sessions_argument(run)
+    run.add_argument(
+        "--iterations",
+        type=int,
+        default=0,
+        help="stop after N polling cycles (0 means run forever)",
+    )
+    run.add_argument("--verbose", action="store_true", help="enable verbose watcher logs")
 
     bucket_ids = subparsers.add_parser("bucket-ids", help="print recommended bucket ids")
     _add_host_argument(bucket_ids)
@@ -55,6 +124,15 @@ def main() -> int:
     codex_json.add_argument("--date", dest="target_date", type=_parse_date, default=date.today())
     codex_json.add_argument("--sessions-dir", type=Path)
     codex_json.add_argument("--pretty", action="store_true")
+
+    qoder_json = subparsers.add_parser(
+        "qoder-json",
+        help="read local Qoder project transcripts and print real events",
+    )
+    _add_host_argument(qoder_json)
+    qoder_json.add_argument("--date", dest="target_date", type=_parse_date, default=date.today())
+    qoder_json.add_argument("--projects-dir", type=Path)
+    qoder_json.add_argument("--pretty", action="store_true")
 
     opencode_session_buckets_json = subparsers.add_parser(
         "opencode-session-buckets-json",
@@ -99,6 +177,23 @@ def main() -> int:
         help="replace only the same local-day window before inserting",
     )
     codex_push.add_argument("--pretty", action="store_true")
+
+    qoder_push = subparsers.add_parser(
+        "qoder-push",
+        help="read real Qoder events and push them into ActivityWatch",
+    )
+    _add_host_argument(qoder_push)
+    qoder_push.add_argument("--date", dest="target_date", type=_parse_date, default=date.today())
+    qoder_push.add_argument("--projects-dir", type=Path)
+    qoder_push.add_argument("--aw-url", default="http://127.0.0.1:5600")
+    qoder_push.add_argument("--timeout-seconds", type=float, default=10.0)
+    qoder_push.add_argument(
+        "--replace-day",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="replace only the same local-day window before inserting",
+    )
+    qoder_push.add_argument("--pretty", action="store_true")
 
     opencode_session_buckets_push = subparsers.add_parser(
         "opencode-session-buckets-push",
@@ -153,6 +248,24 @@ def main() -> int:
         help="replace only the same local-day window before inserting",
     )
     codex_backfill.add_argument("--pretty", action="store_true")
+
+    qoder_backfill = subparsers.add_parser(
+        "qoder-backfill",
+        help="push a rolling window of Qoder raw events into ActivityWatch",
+    )
+    _add_host_argument(qoder_backfill)
+    qoder_backfill.add_argument("--end-date", dest="target_date", type=_parse_date, default=date.today())
+    qoder_backfill.add_argument("--days", type=int, default=30)
+    qoder_backfill.add_argument("--projects-dir", type=Path)
+    qoder_backfill.add_argument("--aw-url", default="http://127.0.0.1:5600")
+    qoder_backfill.add_argument("--timeout-seconds", type=float, default=10.0)
+    qoder_backfill.add_argument(
+        "--replace-day",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="replace only the same local-day window before inserting",
+    )
+    qoder_backfill.add_argument("--pretty", action="store_true")
 
     opencode_session_buckets_backfill = subparsers.add_parser(
         "opencode-session-buckets-backfill",
@@ -219,6 +332,29 @@ def main() -> int:
     )
     codex_watch.add_argument("--pretty", action="store_true")
 
+    qoder_watch = subparsers.add_parser(
+        "qoder-watch",
+        help="run a polling watcher that refreshes today's Qoder raw events",
+    )
+    _add_host_argument(qoder_watch)
+    qoder_watch.add_argument("--projects-dir", type=Path)
+    qoder_watch.add_argument("--aw-url", default="http://127.0.0.1:5600")
+    qoder_watch.add_argument("--timeout-seconds", type=float, default=10.0)
+    qoder_watch.add_argument("--interval-seconds", type=float, default=15.0)
+    qoder_watch.add_argument(
+        "--replace-day",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="replace only the same local-day window before inserting",
+    )
+    qoder_watch.add_argument(
+        "--iterations",
+        type=int,
+        default=0,
+        help="stop after N polling cycles (0 means run forever)",
+    )
+    qoder_watch.add_argument("--pretty", action="store_true")
+
     opencode_session_buckets_watch = subparsers.add_parser(
         "opencode-session-buckets-watch",
         help="poll and refresh the optional session-workspace projection for today's activity",
@@ -252,7 +388,25 @@ def main() -> int:
     visualize_serve.add_argument("--port", type=int, default=8787)
     visualize_serve.add_argument("--open", action="store_true", dest="open_browser")
 
-    args = parser.parse_args()
+    raw_argv = argv if argv is not None else sys.argv[1:]
+    args = parser.parse_args(_normalize_argv(raw_argv))
+    if args.command == "run":
+        return _cmd_run(
+            host=args.host,
+            sources=tuple(args.sources or WATCHER_SOURCES),
+            db_path=args.db_path,
+            sessions_dir=args.sessions_dir,
+            qoder_projects_dir=args.qoder_projects_dir,
+            aw_url=args.aw_url,
+            timeout_seconds=args.timeout_seconds,
+            interval_seconds=args.interval_seconds,
+            backfill_days=args.backfill_days,
+            replace_day=args.replace_day,
+            enable_session_workspace=args.enable_session_workspace,
+            include_child_sessions=args.include_child_sessions,
+            iterations=args.iterations,
+            verbose=args.verbose,
+        )
     if args.command == "bucket-ids":
         return _cmd_bucket_ids(args.host)
     if args.command == "demo-json":
@@ -269,6 +423,13 @@ def main() -> int:
             host=args.host,
             target_date=args.target_date,
             sessions_dir=args.sessions_dir,
+            pretty=args.pretty,
+        )
+    if args.command == "qoder-json":
+        return _cmd_qoder_json(
+            host=args.host,
+            target_date=args.target_date,
+            projects_dir=args.projects_dir,
             pretty=args.pretty,
         )
     if args.command == "opencode-session-buckets-json":
@@ -294,6 +455,16 @@ def main() -> int:
             host=args.host,
             target_date=args.target_date,
             sessions_dir=args.sessions_dir,
+            aw_url=args.aw_url,
+            timeout_seconds=args.timeout_seconds,
+            replace_day=args.replace_day,
+            pretty=args.pretty,
+        )
+    if args.command == "qoder-push":
+        return _cmd_qoder_push(
+            host=args.host,
+            target_date=args.target_date,
+            projects_dir=args.projects_dir,
             aw_url=args.aw_url,
             timeout_seconds=args.timeout_seconds,
             replace_day=args.replace_day,
@@ -332,6 +503,17 @@ def main() -> int:
             replace_day=args.replace_day,
             pretty=args.pretty,
         )
+    if args.command == "qoder-backfill":
+        return _cmd_qoder_backfill(
+            host=args.host,
+            target_date=args.target_date,
+            days=args.days,
+            projects_dir=args.projects_dir,
+            aw_url=args.aw_url,
+            timeout_seconds=args.timeout_seconds,
+            replace_day=args.replace_day,
+            pretty=args.pretty,
+        )
     if args.command == "opencode-session-buckets-backfill":
         return _cmd_opencode_session_buckets_backfill(
             host=args.host,
@@ -359,6 +541,17 @@ def main() -> int:
         return _cmd_codex_watch(
             host=args.host,
             sessions_dir=args.sessions_dir,
+            aw_url=args.aw_url,
+            timeout_seconds=args.timeout_seconds,
+            interval_seconds=args.interval_seconds,
+            replace_day=args.replace_day,
+            iterations=args.iterations,
+            pretty=args.pretty,
+        )
+    if args.command == "qoder-watch":
+        return _cmd_qoder_watch(
+            host=args.host,
+            projects_dir=args.projects_dir,
             aw_url=args.aw_url,
             timeout_seconds=args.timeout_seconds,
             interval_seconds=args.interval_seconds,
@@ -402,6 +595,54 @@ def _add_include_child_sessions_argument(parser: argparse.ArgumentParser) -> Non
         action=argparse.BooleanOptionalAction,
         default=False,
         help="include child/subagent sessions in the session workspace projection",
+    )
+
+
+def _cmd_run(
+    *,
+    host: str | None,
+    sources: tuple[str, ...],
+    db_path: Path | None,
+    sessions_dir: Path | None,
+    qoder_projects_dir: Path | None,
+    aw_url: str,
+    timeout_seconds: float,
+    interval_seconds: float,
+    backfill_days: int,
+    replace_day: bool,
+    enable_session_workspace: bool,
+    include_child_sessions: bool,
+    iterations: int,
+    verbose: bool,
+) -> int:
+    if interval_seconds <= 0:
+        print("--interval-seconds must be positive", file=sys.stderr)
+        return 1
+    if backfill_days <= 0:
+        print("--backfill-days must be positive", file=sys.stderr)
+        return 1
+    if iterations < 0:
+        print("--iterations must be >= 0", file=sys.stderr)
+        return 1
+    sources = tuple(dict.fromkeys(sources))
+    resolved_host = _resolve_push_host(host, aw_url=aw_url, timeout_seconds=timeout_seconds)
+    configure_logging(verbose=verbose)
+    return run_service(
+        RunConfig(
+            host=resolved_host,
+            aw_url=aw_url,
+            timeout_seconds=timeout_seconds,
+            interval_seconds=interval_seconds,
+            replace_day=replace_day,
+            iterations=iterations,
+            backfill_days=backfill_days,
+            sources=sources,
+            db_path=db_path,
+            sessions_dir=sessions_dir,
+            qoder_projects_dir=qoder_projects_dir,
+            enable_session_workspace=enable_session_workspace,
+            include_child_sessions=include_child_sessions,
+        )
     )
 
 
@@ -461,6 +702,26 @@ def _cmd_codex_json(
         host=host,
         target_date=target_date,
         sessions_dir=resolved,
+    ).to_dict()
+    return _print_payload(payload, pretty=pretty)
+
+
+def _cmd_qoder_json(
+    *,
+    host: str,
+    target_date: date,
+    projects_dir: Path | None,
+    pretty: bool,
+) -> int:
+    host = _resolve_local_host(host)
+    resolved = projects_dir or find_qoder_projects_dir()
+    if resolved is None:
+        print("no Qoder projects directory found", file=sys.stderr)
+        return 1
+    payload = collect_qoder_payload(
+        host=host,
+        target_date=target_date,
+        projects_dir=resolved,
     ).to_dict()
     return _print_payload(payload, pretty=pretty)
 
@@ -586,6 +847,57 @@ def _cmd_codex_push(
         "host": host,
         "date": target_date.isoformat(),
         "sessions_dir": str(resolved),
+        "replace_day": replace_day,
+        "summary": summary.to_dict(),
+        "raw_bucket": payload.raw_bucket.to_dict(),
+    }
+    if pretty:
+        print(json.dumps(output, indent=2, ensure_ascii=False))
+    else:
+        print(json.dumps(output, ensure_ascii=False))
+    return 0
+
+
+def _cmd_qoder_push(
+    *,
+    host: str,
+    target_date: date,
+    projects_dir: Path | None,
+    aw_url: str,
+    timeout_seconds: float,
+    replace_day: bool,
+    pretty: bool,
+) -> int:
+    host = _resolve_push_host(host, aw_url=aw_url, timeout_seconds=timeout_seconds)
+    resolved = projects_dir or find_qoder_projects_dir()
+    if resolved is None:
+        print("no Qoder projects directory found", file=sys.stderr)
+        return 1
+    payload = collect_qoder_payload(
+        host=host,
+        target_date=target_date,
+        projects_dir=resolved,
+    )
+    replace_start = None
+    replace_end = None
+    if replace_day:
+        start, end = local_day_bounds(target_date)
+        replace_start = start.isoformat()
+        replace_end = end.isoformat()
+    transport = ActivityWatchTransport(
+        base_url=aw_url,
+        timeout_seconds=timeout_seconds,
+    )
+    summary = transport.push_payload(
+        payload,
+        replace_start=replace_start,
+        replace_end=replace_end,
+    )
+    output: dict[str, Any] = {
+        "aw_url": aw_url,
+        "host": host,
+        "date": target_date.isoformat(),
+        "projects_dir": str(resolved),
         "replace_day": replace_day,
         "summary": summary.to_dict(),
         "raw_bucket": payload.raw_bucket.to_dict(),
@@ -768,6 +1080,72 @@ def _cmd_codex_backfill(
         "days": days,
         "end_date": target_date.isoformat(),
         "sessions_dir": str(resolved),
+        "replace_day": replace_day,
+        "summary": {
+            "raw_inserted": total_inserted,
+            "raw_deleted": total_deleted,
+        },
+        "items": items,
+    }
+    if pretty:
+        print(json.dumps(output, indent=2, ensure_ascii=False))
+    else:
+        print(json.dumps(output, ensure_ascii=False))
+    return 0
+
+
+def _cmd_qoder_backfill(
+    *,
+    host: str,
+    target_date: date,
+    days: int,
+    projects_dir: Path | None,
+    aw_url: str,
+    timeout_seconds: float,
+    replace_day: bool,
+    pretty: bool,
+) -> int:
+    if days <= 0:
+        print("--days must be positive", file=sys.stderr)
+        return 1
+    host = _resolve_push_host(host, aw_url=aw_url, timeout_seconds=timeout_seconds)
+    resolved = projects_dir or find_qoder_projects_dir()
+    if resolved is None:
+        print("no Qoder projects directory found", file=sys.stderr)
+        return 1
+    transport = ActivityWatchTransport(base_url=aw_url, timeout_seconds=timeout_seconds)
+    items: list[dict[str, Any]] = []
+    total_inserted = 0
+    total_deleted = 0
+    for offset in range(days - 1, -1, -1):
+        day = target_date - timedelta(days=offset)
+        payload = collect_qoder_payload(host=host, target_date=day, projects_dir=resolved)
+        replace_start = None
+        replace_end = None
+        if replace_day:
+            start, end = local_day_bounds(day)
+            replace_start = start.isoformat()
+            replace_end = end.isoformat()
+        summary = transport.push_payload(
+            payload,
+            replace_start=replace_start,
+            replace_end=replace_end,
+        )
+        total_inserted += summary.raw_inserted
+        total_deleted += summary.raw_deleted
+        items.append(
+            {
+                "date": day.isoformat(),
+                "raw_inserted": summary.raw_inserted,
+                "raw_deleted": summary.raw_deleted,
+            }
+        )
+    output = {
+        "aw_url": aw_url,
+        "host": host,
+        "days": days,
+        "end_date": target_date.isoformat(),
+        "projects_dir": str(resolved),
         "replace_day": replace_day,
         "summary": {
             "raw_inserted": total_inserted,
@@ -985,6 +1363,69 @@ def _cmd_codex_watch(
             return 0
 
 
+def _cmd_qoder_watch(
+    *,
+    host: str,
+    projects_dir: Path | None,
+    aw_url: str,
+    timeout_seconds: float,
+    interval_seconds: float,
+    replace_day: bool,
+    iterations: int,
+    pretty: bool,
+) -> int:
+    if interval_seconds <= 0:
+        print("--interval-seconds must be positive", file=sys.stderr)
+        return 1
+    if iterations < 0:
+        print("--iterations must be >= 0", file=sys.stderr)
+        return 1
+    host = _resolve_push_host(host, aw_url=aw_url, timeout_seconds=timeout_seconds)
+    resolved = projects_dir or find_qoder_projects_dir()
+    if resolved is None:
+        print("no Qoder projects directory found", file=sys.stderr)
+        return 1
+    transport = ActivityWatchTransport(base_url=aw_url, timeout_seconds=timeout_seconds)
+    count = 0
+    while True:
+        now = datetime.now().astimezone()
+        target_date = now.date()
+        payload = collect_qoder_payload(host=host, target_date=target_date, projects_dir=resolved)
+        replace_start = None
+        replace_end = None
+        if replace_day:
+            start, end = local_day_bounds(target_date)
+            replace_start = start.isoformat()
+            replace_end = end.isoformat()
+        summary = transport.push_payload(
+            payload,
+            replace_start=replace_start,
+            replace_end=replace_end,
+        )
+        output = {
+            "timestamp": now.isoformat(),
+            "host": host,
+            "date": target_date.isoformat(),
+            "projects_dir": str(resolved),
+            "replace_day": replace_day,
+            "summary": summary.to_dict(),
+            "raw_bucket": payload.raw_bucket.to_dict(),
+        }
+        if pretty:
+            print(json.dumps(output, indent=2, ensure_ascii=False))
+        else:
+            print(json.dumps(output, ensure_ascii=False))
+        count += 1
+        if iterations and count >= iterations:
+            return 0
+        try:
+            import time as _time
+
+            _time.sleep(interval_seconds)
+        except KeyboardInterrupt:
+            return 0
+
+
 def _cmd_opencode_session_buckets_watch(
     *,
     host: str,
@@ -1065,6 +1506,16 @@ def _print_payload(payload: dict[str, Any], *, pretty: bool) -> int:
 
 def _parse_date(value: str) -> date:
     return date.fromisoformat(value)
+
+
+def _normalize_argv(argv: list[str]) -> list[str]:
+    if not argv:
+        return ["run"]
+    if argv[0] in {"-h", "--help"}:
+        return argv
+    if argv[0] in KNOWN_COMMANDS:
+        return argv
+    return ["run", *argv]
 
 
 def _resolve_local_host(host: str | None) -> str:

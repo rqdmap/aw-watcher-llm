@@ -4,7 +4,7 @@ RAW_BUCKET_TYPE = "com.rqdmap.llm.raw.v1"
 SESSION_BUCKET_TYPE = "com.rqdmap.llm.session.workspace.v1"
 SESSION_WORKSPACE_HOST_PREFIX = "llm-workspace-"
 
-RAW_SOURCES = ("opencode", "claudecode", "codex")
+RAW_SOURCES = ("opencode", "claudecode", "codex", "qoder")
 
 
 def default_host() -> str:

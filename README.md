@@ -9,7 +9,7 @@ Current scope:
 - generate realistic demo events for `OpenCode`
 - read real `OpenCode` sessions from the local SQLite database
 - read real `Codex` rollout sessions from local JSONL files
-- run as a polling watcher or a historical backfill tool
+- run as a long-lived watcher service or a historical backfill tool
 
 The current design uses:
 
@@ -46,6 +46,31 @@ Install editable:
 ```bash
 python3 -m pip install -e .
 ```
+
+Or use the bundled `Makefile`:
+
+```bash
+make venv
+make install
+make run
+```
+
+Run the long-lived watcher service:
+
+```bash
+# `run` is the default subcommand
+aw-watcher-llm
+
+# explicit form, with both supported sources enabled
+aw-watcher-llm run --source opencode --source codex --interval-seconds 15 --backfill-days 2
+```
+
+The `run` service is intended to behave like a normal ActivityWatch watcher:
+
+- it stays in the foreground and keeps polling until stopped
+- it keeps retrying if ActivityWatch is temporarily unavailable
+- it keeps retrying if OpenCode or Codex are not installed yet
+- it can refresh a rolling window with `--backfill-days` to cover restarts and date rollover
 
 Show recommended bucket ids:
 
@@ -184,9 +209,22 @@ python3 -m aw_watcher_llm visualize-serve \
 
 Then open `http://127.0.0.1:8787/`.
 
-`opencode-push`, `opencode-backfill`, `opencode-watch`, `codex-push`, `codex-backfill`, and `codex-watch` replace existing events only inside the same local-day window by default.
+`run`, `opencode-push`, `opencode-backfill`, `opencode-watch`, `codex-push`, `codex-backfill`, and `codex-watch` replace existing events only inside the same local-day window by default.
 
-If omitted, `--host` defaults to the ActivityWatch server hostname for push/backfill/watch and to the local system hostname for offline inspection commands.
+If omitted, `--host` defaults to the ActivityWatch server hostname for run/push/backfill/watch and to the local system hostname for offline inspection commands.
+
+## ActivityWatch integration
+
+For an "official-style" setup, prefer running `aw-watcher-llm` as a normal foreground watcher and letting `aw-qt` keep it alive, instead of daemonizing it inside the process itself.
+
+If your ActivityWatch installation supports custom modules on `PATH`, add it to `aw-qt.toml`:
+
+```toml
+[aw-qt]
+autostart_modules = ["aw-server-rust", "aw-watcher-afk", "aw-watcher-window", "aw-watcher-llm"]
+```
+
+If you are not using `aw-qt`, run `aw-watcher-llm` under your platform service manager instead.
 
 ## Files
 
