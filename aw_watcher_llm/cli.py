@@ -38,6 +38,7 @@ KNOWN_COMMANDS = {
     "opencode-json",
     "codex-json",
     "qoder-json",
+    "qoder-stats",
     "opencode-session-buckets-json",
     "opencode-push",
     "codex-push",
@@ -133,6 +134,16 @@ def main(argv: list[str] | None = None) -> int:
     qoder_json.add_argument("--date", dest="target_date", type=_parse_date, default=date.today())
     qoder_json.add_argument("--projects-dir", type=Path)
     qoder_json.add_argument("--pretty", action="store_true")
+
+    qoder_stats = subparsers.add_parser(
+        "qoder-stats",
+        help="summarize Qoder response coverage and log-based token estimation rates",
+    )
+    _add_host_argument(qoder_stats)
+    qoder_stats.add_argument("--end-date", dest="target_date", type=_parse_date, default=date.today())
+    qoder_stats.add_argument("--days", type=int, default=1)
+    qoder_stats.add_argument("--projects-dir", type=Path)
+    qoder_stats.add_argument("--pretty", action="store_true")
 
     opencode_session_buckets_json = subparsers.add_parser(
         "opencode-session-buckets-json",
@@ -432,6 +443,14 @@ def main(argv: list[str] | None = None) -> int:
             projects_dir=args.projects_dir,
             pretty=args.pretty,
         )
+    if args.command == "qoder-stats":
+        return _cmd_qoder_stats(
+            host=args.host,
+            target_date=args.target_date,
+            days=args.days,
+            projects_dir=args.projects_dir,
+            pretty=args.pretty,
+        )
     if args.command == "opencode-session-buckets-json":
         return _cmd_opencode_session_buckets_json(
             host=args.host,
@@ -724,6 +743,64 @@ def _cmd_qoder_json(
         projects_dir=resolved,
     ).to_dict()
     return _print_payload(payload, pretty=pretty)
+
+
+def _cmd_qoder_stats(
+    *,
+    host: str,
+    target_date: date,
+    days: int,
+    projects_dir: Path | None,
+    pretty: bool,
+) -> int:
+    if days <= 0:
+        print("--days must be positive", file=sys.stderr)
+        return 1
+    host = _resolve_local_host(host)
+    resolved = projects_dir or find_qoder_projects_dir()
+    if resolved is None:
+        print("no Qoder projects directory found", file=sys.stderr)
+        return 1
+
+    items: list[dict[str, Any]] = []
+    session_totals: dict[str, dict[str, Any]] = {}
+    for offset in range(days - 1, -1, -1):
+        day = target_date - timedelta(days=offset)
+        payload = collect_qoder_payload(
+            host=host,
+            target_date=day,
+            projects_dir=resolved,
+        )
+        day_summary, day_sessions = _summarize_qoder_events(payload.raw_events)
+        items.append(
+            {
+                "date": day.isoformat(),
+                **day_summary,
+            }
+        )
+        _merge_qoder_session_totals(session_totals, day_sessions)
+
+    summary = _aggregate_qoder_day_items(items)
+    summary["session_count"] = len(session_totals)
+    output: dict[str, Any] = {
+        "host": host,
+        "start_date": (target_date - timedelta(days=days - 1)).isoformat(),
+        "end_date": target_date.isoformat(),
+        "days": days,
+        "projects_dir": str(resolved),
+        "summary": summary,
+        "items": items,
+    }
+    if session_totals:
+        output["top_missing_sessions"] = sorted(
+            session_totals.values(),
+            key=lambda item: (
+                -item["missing_input_responses"],
+                -item["responses"],
+                item["session_id"],
+            ),
+        )[:10]
+    return _print_payload(output, pretty=pretty)
 
 
 def _cmd_opencode_session_buckets_json(
@@ -1493,6 +1570,148 @@ def _cmd_opencode_session_buckets_watch(
             _time.sleep(interval_seconds)
         except KeyboardInterrupt:
             return 0
+
+
+def _summarize_qoder_events(events: list[Any]) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
+    session_totals: dict[str, dict[str, Any]] = {}
+    responses = 0
+    estimated_input_responses = 0
+    official_input_responses = 0
+    covered_input_responses = 0
+    missing_input_responses = 0
+    estimated_input_tokens = 0
+    official_input_tokens = 0
+
+    for event in events:
+        data = getattr(event, "data", None)
+        if not isinstance(data, dict) or data.get("kind") != "response.completed":
+            continue
+        responses += 1
+        session_id = str(data.get("session_id") or "")
+        title = str(data.get("title") or "")
+        input_tokens = _qoder_stats_int(data.get("input_tokens"))
+        estimated = bool(data.get("usage_estimated"))
+        covered = input_tokens > 0
+        official = covered and not estimated
+        missing = not covered
+
+        session_row = session_totals.setdefault(
+            session_id,
+            {
+                "session_id": session_id,
+                "title": title,
+                "responses": 0,
+                "estimated_input_responses": 0,
+                "official_input_responses": 0,
+                "covered_input_responses": 0,
+                "missing_input_responses": 0,
+            },
+        )
+        session_row["responses"] += 1
+
+        if estimated:
+            estimated_input_responses += 1
+            estimated_input_tokens += input_tokens
+            session_row["estimated_input_responses"] += 1
+        if official:
+            official_input_responses += 1
+            official_input_tokens += input_tokens
+            session_row["official_input_responses"] += 1
+        if covered:
+            covered_input_responses += 1
+            session_row["covered_input_responses"] += 1
+        if missing:
+            missing_input_responses += 1
+            session_row["missing_input_responses"] += 1
+
+    return (
+        {
+            "responses": responses,
+            "estimated_input_responses": estimated_input_responses,
+            "official_input_responses": official_input_responses,
+            "covered_input_responses": covered_input_responses,
+            "missing_input_responses": missing_input_responses,
+            "estimated_input_tokens": estimated_input_tokens,
+            "official_input_tokens": official_input_tokens,
+            "covered_input_tokens": estimated_input_tokens + official_input_tokens,
+            "estimated_input_ratio": _ratio(estimated_input_responses, responses),
+            "covered_input_ratio": _ratio(covered_input_responses, responses),
+            "missing_input_ratio": _ratio(missing_input_responses, responses),
+            "session_count": len(session_totals),
+        },
+        session_totals,
+    )
+
+
+def _merge_qoder_session_totals(
+    totals: dict[str, dict[str, Any]],
+    day_sessions: dict[str, dict[str, Any]],
+) -> None:
+    for session_id, item in day_sessions.items():
+        row = totals.setdefault(
+            session_id,
+            {
+                "session_id": session_id,
+                "title": item["title"],
+                "responses": 0,
+                "estimated_input_responses": 0,
+                "official_input_responses": 0,
+                "covered_input_responses": 0,
+                "missing_input_responses": 0,
+            },
+        )
+        if not row["title"] and item["title"]:
+            row["title"] = item["title"]
+        row["responses"] += item["responses"]
+        row["estimated_input_responses"] += item["estimated_input_responses"]
+        row["official_input_responses"] += item["official_input_responses"]
+        row["covered_input_responses"] += item["covered_input_responses"]
+        row["missing_input_responses"] += item["missing_input_responses"]
+
+
+def _aggregate_qoder_day_items(items: list[dict[str, Any]]) -> dict[str, Any]:
+    responses = sum(_qoder_stats_int(item.get("responses")) for item in items)
+    estimated_input_responses = sum(_qoder_stats_int(item.get("estimated_input_responses")) for item in items)
+    official_input_responses = sum(_qoder_stats_int(item.get("official_input_responses")) for item in items)
+    covered_input_responses = sum(_qoder_stats_int(item.get("covered_input_responses")) for item in items)
+    missing_input_responses = sum(_qoder_stats_int(item.get("missing_input_responses")) for item in items)
+    estimated_input_tokens = sum(_qoder_stats_int(item.get("estimated_input_tokens")) for item in items)
+    official_input_tokens = sum(_qoder_stats_int(item.get("official_input_tokens")) for item in items)
+    return {
+        "responses": responses,
+        "estimated_input_responses": estimated_input_responses,
+        "official_input_responses": official_input_responses,
+        "covered_input_responses": covered_input_responses,
+        "missing_input_responses": missing_input_responses,
+        "estimated_input_tokens": estimated_input_tokens,
+        "official_input_tokens": official_input_tokens,
+        "covered_input_tokens": estimated_input_tokens + official_input_tokens,
+        "estimated_input_ratio": _ratio(estimated_input_responses, responses),
+        "covered_input_ratio": _ratio(covered_input_responses, responses),
+        "missing_input_ratio": _ratio(missing_input_responses, responses),
+        "days_with_responses": sum(1 for item in items if _qoder_stats_int(item.get("responses")) > 0),
+    }
+
+
+def _qoder_stats_int(value: Any) -> int:
+    if isinstance(value, bool):
+        return 0
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError:
+            return 0
+    return 0
+
+
+def _ratio(numerator: int, denominator: int) -> float:
+    if denominator <= 0:
+        return 0.0
+    return round(numerator / denominator, 4)
 
 
 def _print_payload(payload: dict[str, Any], *, pretty: bool) -> int:

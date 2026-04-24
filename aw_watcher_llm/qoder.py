@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from dataclasses import field
 from datetime import date
@@ -22,6 +23,12 @@ SOURCE_NAME = "qoder"
 TOOL_NAME = "Qoder"
 QODER_DIR = Path.home() / ".qoder"
 QODER_PROJECTS_DIR = QODER_DIR / "projects"
+QODER_LOG_PATH = QODER_DIR / "logs" / "qodercli.log"
+_LOG_INPUT_ESTIMATE_RE = re.compile(
+    r"^(?P<timestamp>\S+)\s+\S+\s+\S+\s+current token usage rate: "
+    r"(?P<rate>[0-9.]+)%, max input tokens: (?P<max_input_tokens>\d+), sessionId: "
+    r"(?P<session_id>[^\s,]+)"
+)
 
 
 def _zero_usage() -> dict[str, int]:
@@ -74,6 +81,11 @@ class _NodeState:
     is_tool_result: bool = False
     tool_result_end_ms: int | None = None
     usage: dict[str, int] = field(default_factory=_zero_usage)
+    estimated_input_tokens: int | None = None
+    usage_estimated: bool = False
+    usage_estimate_source: str | None = None
+    usage_estimate_rate: float | None = None
+    usage_estimate_max_input_tokens: int | None = None
 
 
 @dataclass
@@ -91,6 +103,18 @@ class _SessionState:
     turns: list[_NodeState]
 
 
+@dataclass(frozen=True)
+class _LogInputEstimate:
+    timestamp_ms: int
+    root_session_id: str
+    usage_rate: float
+    max_input_tokens: int
+
+    @property
+    def input_tokens(self) -> int:
+        return max(0, int(round((self.usage_rate / 100.0) * self.max_input_tokens)))
+
+
 def find_projects_dir() -> Path | None:
     if not QODER_PROJECTS_DIR.exists():
         return None
@@ -102,6 +126,7 @@ def collect_payload(
     host: str,
     target_date: date,
     projects_dir: Path | None = None,
+    log_path: Path | None = None,
 ) -> WatcherPayload:
     resolved = projects_dir or find_projects_dir()
     if resolved is None:
@@ -118,6 +143,11 @@ def collect_payload(
     metadata = _load_session_metadata(resolved)
     start_ms, end_ms = _day_bounds_ms(target_date)
     sessions = _load_sessions(resolved, metadata)
+    estimates = _load_log_input_estimates(
+        root_session_ids={session.root_session_id for session in sessions},
+        log_path=log_path,
+    )
+    _apply_log_input_estimates(sessions, estimates)
     raw_events = _build_raw_events(sessions=sessions, start_ms=start_ms, end_ms=end_ms)
     return WatcherPayload(
         raw_bucket=raw_bucket,
@@ -440,31 +470,45 @@ def _build_raw_events(
             if not (start_ms <= turn.last_ms < end_ms):
                 continue
             duration_ms = max(0, turn.last_ms - turn.started_ms)
+            input_tokens = turn.usage["input"]
+            if input_tokens == 0 and turn.estimated_input_tokens is not None:
+                input_tokens = turn.estimated_input_tokens
+            data = {
+                "kind": "response.completed",
+                "source": SOURCE_NAME,
+                "project": session.project,
+                "session_id": session.session_id,
+                "root_session_id": session.root_session_id,
+                "parent_session_id": session.parent_session_id,
+                "is_child": session.is_child,
+                "message_id": turn.node_id,
+                "app": TOOL_NAME,
+                "title": _short_label(turn.prompt_text or session.title),
+                "model": None,
+                "provider": None,
+                "agent": turn.agent or session.agent,
+                "input_tokens": input_tokens,
+                "output_tokens": turn.usage["output"],
+                "reasoning_tokens": turn.usage["reasoning"],
+                "cache_read_tokens": turn.usage["cache_read"],
+                "cache_write_tokens": turn.usage["cache_write"],
+                "cost": None,
+            }
+            if turn.usage_estimated:
+                data.update(
+                    {
+                        "usage_estimated": True,
+                        "usage_estimate_source": turn.usage_estimate_source,
+                        "usage_estimated_fields": ["input_tokens"],
+                        "usage_estimate_input_rate": turn.usage_estimate_rate,
+                        "usage_estimate_max_input_tokens": turn.usage_estimate_max_input_tokens,
+                    }
+                )
             events.append(
                 Event(
                     timestamp=_iso_from_ms(turn.last_ms),
                     duration=duration_ms / 1000.0,
-                    data={
-                        "kind": "response.completed",
-                        "source": SOURCE_NAME,
-                        "project": session.project,
-                        "session_id": session.session_id,
-                        "root_session_id": session.root_session_id,
-                        "parent_session_id": session.parent_session_id,
-                        "is_child": session.is_child,
-                        "message_id": turn.node_id,
-                        "app": TOOL_NAME,
-                        "title": _short_label(turn.prompt_text or session.title),
-                        "model": None,
-                        "provider": None,
-                        "agent": turn.agent or session.agent,
-                        "input_tokens": turn.usage["input"],
-                        "output_tokens": turn.usage["output"],
-                        "reasoning_tokens": turn.usage["reasoning"],
-                        "cache_read_tokens": turn.usage["cache_read"],
-                        "cache_write_tokens": turn.usage["cache_write"],
-                        "cost": None,
-                    },
+                    data=data,
                 )
             )
 
@@ -510,6 +554,144 @@ def _usage_total(usage: dict[str, int]) -> int:
     return sum(usage.values())
 
 
+def _load_log_input_estimates(
+    *,
+    root_session_ids: set[str],
+    log_path: Path | None,
+) -> dict[str, list[_LogInputEstimate]]:
+    if not root_session_ids:
+        return {}
+
+    resolved = log_path or QODER_LOG_PATH
+    if not resolved.exists():
+        return {}
+
+    estimates: dict[str, list[_LogInputEstimate]] = {}
+    try:
+        handle = resolved.open()
+    except OSError:
+        return {}
+
+    with handle:
+        for raw_line in handle:
+            match = _LOG_INPUT_ESTIMATE_RE.match(raw_line.strip())
+            if match is None:
+                continue
+            root_session_id = match.group("session_id")
+            if root_session_id not in root_session_ids:
+                continue
+            timestamp_ms = _parse_log_timestamp_ms(match.group("timestamp"))
+            if timestamp_ms is None:
+                continue
+            try:
+                usage_rate = float(match.group("rate"))
+            except ValueError:
+                continue
+            max_input_tokens = _coerce_int(match.group("max_input_tokens")) or 0
+            if usage_rate <= 0 or max_input_tokens <= 0:
+                continue
+            estimates.setdefault(root_session_id, []).append(
+                _LogInputEstimate(
+                    timestamp_ms=timestamp_ms,
+                    root_session_id=root_session_id,
+                    usage_rate=usage_rate,
+                    max_input_tokens=max_input_tokens,
+                )
+            )
+
+    for root_session_id in estimates:
+        estimates[root_session_id].sort(key=lambda item: item.timestamp_ms)
+    return estimates
+
+
+def _apply_log_input_estimates(
+    sessions: list[_SessionState],
+    estimates: dict[str, list[_LogInputEstimate]],
+) -> None:
+    turns_by_root: dict[str, list[_NodeState]] = {}
+    for session in sessions:
+        turns_by_root.setdefault(session.root_session_id, []).extend(session.turns)
+
+    for root_session_id, turns in turns_by_root.items():
+        session_estimates = estimates.get(root_session_id)
+        if not session_estimates:
+            continue
+        ordered_turns = sorted(turns, key=lambda item: (item.last_ms, item.node_id))
+        for turn_index, estimate_index in _align_turns_to_input_estimates(ordered_turns, session_estimates):
+            turn = ordered_turns[turn_index]
+            if turn.usage["input"] > 0:
+                continue
+            estimate = session_estimates[estimate_index]
+            if estimate.input_tokens <= 0:
+                continue
+            turn.estimated_input_tokens = estimate.input_tokens
+            turn.usage_estimated = True
+            turn.usage_estimate_source = "qodercli.log.current_token_usage_rate"
+            turn.usage_estimate_rate = estimate.usage_rate
+            turn.usage_estimate_max_input_tokens = estimate.max_input_tokens
+
+
+def _align_turns_to_input_estimates(
+    turns: list[_NodeState],
+    estimates: list[_LogInputEstimate],
+) -> list[tuple[int, int]]:
+    if not turns or not estimates:
+        return []
+
+    match_window_ms = 30_000
+    skip_cost = match_window_ms + 1
+    inf = 10**18
+    turn_count = len(turns)
+    estimate_count = len(estimates)
+    costs = [[inf] * (estimate_count + 1) for _ in range(turn_count + 1)]
+    moves: list[list[tuple[str, int, int] | None]] = [
+        [None] * (estimate_count + 1) for _ in range(turn_count + 1)
+    ]
+    costs[0][0] = 0
+
+    for turn_index in range(turn_count + 1):
+        for estimate_index in range(estimate_count + 1):
+            current_cost = costs[turn_index][estimate_index]
+            if current_cost >= inf:
+                continue
+
+            if turn_index < turn_count:
+                candidate = current_cost + skip_cost
+                if candidate < costs[turn_index + 1][estimate_index]:
+                    costs[turn_index + 1][estimate_index] = candidate
+                    moves[turn_index + 1][estimate_index] = ("skip_turn", turn_index, estimate_index)
+
+            if estimate_index < estimate_count:
+                candidate = current_cost + skip_cost
+                if candidate < costs[turn_index][estimate_index + 1]:
+                    costs[turn_index][estimate_index + 1] = candidate
+                    moves[turn_index][estimate_index + 1] = ("skip_estimate", turn_index, estimate_index)
+
+            if turn_index < turn_count and estimate_index < estimate_count:
+                diff_ms = abs(turns[turn_index].last_ms - estimates[estimate_index].timestamp_ms)
+                if diff_ms > match_window_ms:
+                    continue
+                candidate = current_cost + diff_ms
+                if candidate < costs[turn_index + 1][estimate_index + 1]:
+                    costs[turn_index + 1][estimate_index + 1] = candidate
+                    moves[turn_index + 1][estimate_index + 1] = ("match", turn_index, estimate_index)
+
+    assignments: list[tuple[int, int]] = []
+    turn_index = turn_count
+    estimate_index = estimate_count
+    while turn_index > 0 or estimate_index > 0:
+        move = moves[turn_index][estimate_index]
+        if move is None:
+            break
+        action, prev_turn_index, prev_estimate_index = move
+        if action == "match":
+            assignments.append((prev_turn_index, prev_estimate_index))
+        turn_index = prev_turn_index
+        estimate_index = prev_estimate_index
+    assignments.reverse()
+    return assignments
+
+
 def _project_name(directory: str | None) -> str | None:
     if not directory:
         return None
@@ -543,6 +725,19 @@ def _parse_iso_ms(value: Any) -> int | None:
 
 def _iso_from_ms(timestamp_ms: int) -> str:
     return datetime.fromtimestamp(timestamp_ms / 1000, tz=timezone.utc).isoformat()
+
+
+def _parse_log_timestamp_ms(value: str) -> int | None:
+    if not value:
+        return None
+    normalized = value.replace("Z", "+00:00")
+    if re.search(r"[+-]\d{4}$", normalized):
+        normalized = normalized[:-5] + normalized[-5:-2] + ":" + normalized[-2:]
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    return int(parsed.timestamp() * 1000)
 
 
 def _nonempty_str(value: Any) -> str | None:
